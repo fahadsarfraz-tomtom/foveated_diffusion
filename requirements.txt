@@ -1,0 +1,12 @@
+# Install DiffSynth-Studio separately (provides diffsynth.*).
+# Pin versions to match your existing environment if needed.
+torch
+torchvision
+accelerate
+pandas
+numpy
+pyyaml
+pillow
+imageio
+opencv-python
+matplotlib
