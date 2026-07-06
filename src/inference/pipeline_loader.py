@@ -118,7 +118,7 @@ def load_video_pipeline(args):
     )
 
     lora_mode = getattr(args, "lora_mode", None)
-    needs_lora = args.experiment == "ours"
+    needs_lora = args.experiment in ("ours", "ours_adaptive")
     if needs_lora:
         if args.lora_checkpoint is not None:
             lora_path = args.lora_checkpoint

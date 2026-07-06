@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--experiment", type=str, default="ours",
                    choices=[
                        # image experiments
-                       "high_res", "naive_mixed_res", "ours",
+                       "high_res", "naive_mixed_res", "ours", "ours_adaptive",
                        "circular_traj", "vary_radius",
                        "runtime", "foveation_trajectory_grid",
                        "user_study",
@@ -125,15 +125,40 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Video-pipeline specific
     p.add_argument("--foveation_trajectory", type=str, default="spline",
-                   choices=["spline", "random_path"],
+                   choices=["spline", "random_path", "adaptive"],
                    help="(video) Foveation-path sampler at inference. `spline` (default) is "
                         "the deterministic default keypoints; `random_path` matches the "
-                        "training-time sampler.")
+                        "training-time sampler; `adaptive` uses the prompt-conditioned policy.")
     p.add_argument("--negative_prompt", type=str, default=None,
                    help="(video) Negative prompt. Defaults to the canonical Wan Chinese negative.")
     p.add_argument("--cfg_scale", type=float, default=5.0,
                    help="(video) CFG scale. Wan default is 5.0; image-side reads guidance_scale instead.")
     p.add_argument("--fps", type=int, default=15, help="(video) Output FPS.")
     p.add_argument("--quality", type=int, default=5, help="(video) Output MP4 quality 1-10.")
+
+    # Adaptive foveation policy (ours)
+    p.add_argument("--adaptive_policy", type=str, default="prompt_hash",
+                   choices=["center", "prompt_hash", "lsca_proxy", "textfov_proxy"],
+                   help="Adaptive policy source. `lsca_proxy` is a deterministic stand-in "
+                        "until a trained FPM checkpoint is available; `textfov_proxy` "
+                        "uses spatial prompt-token heuristics.")
+    p.add_argument("--adaptive_num_fixations", type=int, default=3,
+                   help="Number of fixation centers for adaptive image masks.")
+    p.add_argument("--adaptive_center_range", type=float, default=0.35,
+                   help="Max absolute center coordinate in Chao's [-0.5, 0.5] frame.")
+    p.add_argument("--adaptive_fixed_beta", type=float, default=0.25,
+                   help="Target HR token fraction when --adaptive_beta_mode=fixed.")
+    p.add_argument("--adaptive_beta_mode", type=str, default="fixed",
+                   choices=["fixed", "nafo_mean", "nafo_early", "nafo_late"],
+                   help="How to project NaFo beta(t) to Chao's current static image mask interface.")
+    p.add_argument("--adaptive_beta_min", type=float, default=0.20,
+                   help="NaFo late-step/high-detail HR token budget.")
+    p.add_argument("--adaptive_beta_max", type=float, default=0.85,
+                   help="NaFo early-step/global-structure HR token budget.")
+    p.add_argument("--adaptive_beta_schedule", type=str, default="cosine",
+                   choices=["linear", "cosine", "stepped"],
+                   help="NaFo schedule shape.")
+    p.add_argument("--adaptive_radius", type=float, default=None,
+                   help="Optional fixed radius override. If omitted, radius is solved from beta.")
 
     return p

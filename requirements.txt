@@ -10,3 +10,4 @@ pillow
 imageio
 opencv-python
 matplotlib
+wandb

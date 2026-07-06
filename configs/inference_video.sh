@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Foveated Wan2.1-T2V-1.3B inference.
 #
-# Single config for all three video experiments; pick via --experiment:
-#   high_res - vanilla Wan baseline (no foveation)
-#   naive    - spline FoveationState, no LoRA (paper Fig.8 failure mode)
-#   ours     - spline FoveationState + LoRA (paper headline result)
+# Single config for the video experiments; pick via --experiment:
+#   high_res      - vanilla Wan baseline (no foveation)
+#   naive         - spline FoveationState, no LoRA (paper Fig.8 failure mode)
+#   ours          - spline FoveationState + LoRA (paper headline result)
+#   ours_adaptive - adaptive prompt path + LoRA
 #
 # When --lora_checkpoint is omitted, `ours` auto-downloads the random_path Wan
 # LoRA from huggingface.co/bchao1/foveated-diffusion (video/fov_random_path.safetensors).
@@ -31,5 +32,7 @@ python inference.py \
   --num_inference_steps 50 \
   --cfg_scale 5.0 \
   --seed 0 \
-  --foveation_trajectory spline \
+  --foveation_trajectory "${FOVEATION_TRAJECTORY:-spline}" \
+  --adaptive_policy "${ADAPTIVE_POLICY:-textfov_proxy}" \
+  --adaptive_beta_mode "${ADAPTIVE_BETA_MODE:-nafo_mean}" \
   --output_dir "$OUTPUT_DIR"

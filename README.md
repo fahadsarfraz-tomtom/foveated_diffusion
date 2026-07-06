@@ -22,10 +22,14 @@ per `lr_factor × lr_factor` HR block), reducing the token sequence to
 ```
 release/
 ├── train.py                       Training entry point (image / video)
+├── train_fpm_coco.py              Phase-1 supervised COCO FPM bootstrap
 ├── inference.py                   Inference entry point (image / video)
 ├── requirements.txt
+├── scripts/
+│   └── setup_foveation_datasets.py             download COCO + Visual Genome
 ├── configs/                       Example shell launchers
 │   ├── train_lora.sh                           image
+│   ├── train_fpm_coco.sh                       supervised FPM bootstrap
 │   ├── inference_ours.sh                       image
 │   ├── inference_baselines.sh                  image
 │   ├── inference_trajectory_grid.sh            image
@@ -33,6 +37,8 @@ release/
 │   └── inference_video.sh                      video inference
 └── src/
     ├── masks/                    Where (centers, radii) come from + how they assemble into a FoveationState
+    │   ├── adaptive.py            our policy adapter: prompt/TextFov proxy centers + NaFo budget projection
+    │   ├── fpm.py                 our trainable LSCA/FPM scaffold for learned fixation prediction
     │   ├── shapes.py              image: single-mask primitives (circle, square, polygons, multi-circle)
     │   ├── trajectories.py        image: sets of static masks for grid experiments
     │   ├── paths.py               video: procedural sources — sample_random_path, sample_spline_path
@@ -42,6 +48,7 @@ release/
     ├── training/
     │   ├── module.py              Flux2FoveatedImageTrainingModule        (image)
     │   ├── module_video.py        WanFoveatedVideoTrainingModule          (video)
+    │   ├── coco_fpm.py            COCO object-slot supervision for FPM
     │   └── args.py                argparse — --pipeline {image,video} dispatch
     ├── inference/
     │   ├── pipeline_loader.py     load_pipeline (image) + load_video_pipeline
@@ -107,6 +114,73 @@ Key arguments (see `src/training/args.py`):
 | `--lr_downsample_factor` | `2` | LR-periphery downsample factor (2 or 4) |
 | `--decode_mode` | `direct` | `direct` (HR only) or `merge` (blend HR + LR decoded latents) |
 
+## Dataset setup for learned foveation
+
+Download COCO and Visual Genome into the layout expected by the foveation-policy
+supervision code:
+
+```bash
+python scripts/setup_foveation_datasets.py --root ./data/foveation
+```
+
+For a quicker Phase-1-only setup, download COCO plus Visual Genome annotations
+without Visual Genome images:
+
+```bash
+python scripts/setup_foveation_datasets.py \
+  --root ./data/foveation \
+  --datasets coco visual_genome \
+  --skip-vg-images
+```
+
+COCO is used first for clean object-count/center/radius supervision. Visual
+Genome is downloaded now so the next phase can add relationship and region-text
+supervision without changing the dataset layout.
+
+On SPIKE, seed the shared foveation PVC with a CPU-only Run:AI job:
+
+```bash
+bash scripts/runai_setup_foveation_datasets.sh
+```
+
+The default SPIKE dataset root is:
+
+```text
+/data/bucket/foveated_diffusion/datasets/foveation
+```
+
+Set `SKIP_VG_IMAGES=1` to fetch COCO plus Visual Genome annotations only. The
+script is resumable: existing non-empty archives are skipped and extraction
+markers prevent repeated unzips.
+
+## FPM supervision bootstrap
+
+Train the Foveal Prediction Module on COCO image-caption pairs and instance
+annotations:
+
+```bash
+bash configs/train_fpm_coco.sh
+```
+
+This trains the policy module to predict fixed object slots
+`(cx, cy, r, objectness)` plus a Gaussian teacher map. It is a supervised
+bootstrap for localization/counting, not yet full FLUX latent training. The next
+step is to plug the learned policy into Chao's mixed-resolution LoRA training.
+
+On SPIKE, after this branch is pushed to the Git repository used by the
+`password-github-repo` Run:AI secret, launch:
+
+```bash
+GIT_REV=fahad.sarfraz-codex/adaptive-foveation-policy \
+bash scripts/runai_train_fpm_coco.sh
+```
+
+The training launcher expects COCO at
+`/data/bucket/foveated_diffusion/datasets/foveation/coco`, git-syncs the repo
+into `/git/foveated_diffusion`, and writes checkpoints under
+`/data/bucket/foveated_diffusion/outputs/fpm_coco/`. Override
+`GIT_REPOSITORY` if the Chao-based branch lives in a fork.
+
 ## Inference (image)
 
 Select an experiment via `--experiment`:
@@ -116,6 +190,7 @@ Select an experiment via `--experiment`:
 | `high_res` | Full-resolution baseline. **No foveation mask** — runs with `decode_mode="direct"` so every token is HR. |
 | `naive_mixed_res` | Mixed-resolution with naive bilinear/nearest up/down (no learned model). Uses the **default eval mask**: a single centered region (shape `--full_eval_mask`, default `square`; radius `--mask_radius`, default `0.5`) at image center `(0, 0)`, shared across all prompts. |
 | `ours` | Our method: foveated flow matching with LoRA. Uses the **same default eval mask as `naive_mixed_res`** (same shape, radius, and center) so the two are directly comparable. |
+| `ours_adaptive` | Our adaptive policy layer on top of Chao's mixed-resolution pipeline. Uses prompt/TextFov proxy or center policies for mask placement and NaFo budget projection for the HR token fraction; saves masks plus CSV/JSONL metadata. |
 | `circular_traj` | Single prompt, mask center orbits over `--num_frames` steps. |
 | `vary_radius` | Single prompt, sweeps foveation radius from 0.1 to 1.0. |
 | `runtime` | Runtime benchmark across HR-token counts. |
@@ -127,6 +202,9 @@ Examples:
 ```bash
 # Our method, batched over a prompt CSV
 bash configs/inference_ours.sh
+
+# Our adaptive policy layer, batched over a prompt CSV
+bash configs/inference_adaptive.sh
 
 # Trajectory grid (spiral) for paper figures
 bash configs/inference_trajectory_grid.sh
@@ -166,6 +244,12 @@ Key arguments (see `src/inference/args.py`):
 | `--foveation_trajectory_type` | `circular` | Trajectory type for `foveation_trajectory_grid` (see table below) |
 | `--num_cols` | `4` | Columns in the `foveation_trajectory_grid` output montage |
 | `--grid_rows` / `--grid_cols` | `3` / `3` | Grid dimensions for `--foveation_trajectory_type grid` |
+| `--adaptive_policy` | `prompt_hash` | Adaptive placement policy for `ours_adaptive`: `center`, `prompt_hash`, `lsca_proxy`, or `textfov_proxy`. |
+| `--adaptive_num_fixations` | `3` | Number of fixation centers for adaptive image masks and video paths. |
+| `--adaptive_beta_mode` | `fixed` | How to project NaFo's timestep-varying budget to the current static image mask interface: `fixed`, `nafo_mean`, `nafo_early`, or `nafo_late`. |
+| `--adaptive_fixed_beta` | `0.25` | Target HR token fraction when `--adaptive_beta_mode fixed`. |
+| `--adaptive_beta_min` / `--adaptive_beta_max` | `0.20` / `0.85` | Late-step and early-step NaFo HR token budgets. |
+| `--adaptive_radius` | `None` | Optional fixed radius override; otherwise radius is solved from the beta budget. |
 
 ### Foveation mask trajectories (image)
 
@@ -244,6 +328,7 @@ bash configs/inference_video.sh
 # Other experiments
 EXPERIMENT=high_res bash configs/inference_video.sh
 EXPERIMENT=naive    bash configs/inference_video.sh
+EXPERIMENT=ours_adaptive bash configs/inference_video.sh
 
 # Custom prompt
 PROMPT="A majestic eagle soaring over a mountain range at sunrise..." \
@@ -257,6 +342,7 @@ Experiments (`--pipeline video --experiment`):
 | `high_res` | Vanilla Wan T2V baseline; no foveation. |
 | `naive` | Spline `FoveationState`, no LoRA. Shows the paper's Fig. 8 failure mode (scale mismatches / duplicates at the HR/LR boundary). |
 | `ours` | Spline `FoveationState` + LoRA. The default `--lora_checkpoint` auto-downloads `video/fov_random_path.safetensors` from [bchao1/foveated-diffusion](https://huggingface.co/bchao1/foveated-diffusion) on first use (drop a copy at `checkpoints/wan_random_path_lora.safetensors` to override locally). To use a saliency-trained or bbox-trained LoRA, just point `--lora_checkpoint` at it — the inference code path is identical regardless of how the LoRA was trained. |
+| `ours_adaptive` | Adaptive prompt/TextFov path + LoRA. Emits Chao-compatible per-latent-frame centers/radii, saves an overlay MP4, and writes foveation metadata JSON. |
 
 Each foveated experiment saves the raw MP4 plus a `_with_circle.mp4` variant where
 the per-frame foveation circle is drawn paper-figure-style.
@@ -266,7 +352,7 @@ Key arguments (video-specific; see `src/inference/args.py`):
 | Arg | Default | Meaning |
 |---|---|---|
 | `--pipeline` | `image` | Set to `video` |
-| `--foveation_trajectory` | `spline` | `spline` (deterministic default keypoints) or `random_path` (matches the training sampler) |
+| `--foveation_trajectory` | `spline` | `spline` (deterministic default keypoints), `random_path` (matches the training sampler), or `adaptive` (prompt/TextFov path; also forced by `ours_adaptive`) |
 | `--num_frames` | `100` | Set `--num_frames 81` for the paper config (or use the supplied shell config) |
 | `--cfg_scale` | `5.0` | Wan default; image-side uses `--guidance_scale` instead |
 | `--prompt` | canonical Wan demo when omitted (`DEFAULT_VIDEO_PROMPT`); FLUX2 default for `--pipeline image` | |

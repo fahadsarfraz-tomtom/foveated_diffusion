@@ -4,6 +4,7 @@ All runners take (pipe, args, output_dir) and write images / metadata under
 `output_dir`. See README for the per-experiment output layout.
 """
 
+import json
 import math
 import os
 import random
@@ -18,6 +19,8 @@ from torchvision.utils import save_image
 from diffsynth.core import load_state_dict
 
 from ..masks import (
+    AdaptiveFoveationPolicy,
+    adaptive_config_from_args,
     create_foveation_mask,
     create_foveation_mask_full_res,
     gaussian_blur_mask_2d,
@@ -142,6 +145,82 @@ def run_single_prompt_experiment(pipe, args, output_dir):
     """Dispatcher for high_res / naive_mixed_res / ours (each uses _run_full_eval)."""
     prompts = _resolve_prompts(args)
     _run_full_eval(SINGLE_PROMPT_FUNCS[args.experiment], pipe, args, output_dir, prompts)
+
+
+def run_adaptive_policy_experiment(pipe, args, output_dir):
+    """Run our adaptive policy on top of Chao's static image foveation interface.
+
+    The current FLUX image pipeline accepts one mask per generation and packs the
+    mixed-resolution tokens before denoising. For NaFo we therefore project the
+    time-varying budget to a single beta via ``--adaptive_beta_mode``.
+    """
+    prompts = _resolve_prompts(args)
+    policy = AdaptiveFoveationPolicy(adaptive_config_from_args(args))
+    lr_factor = getattr(args, "lr_downsample_factor", 2)
+    subset_idx = getattr(args, "subset_idx", 0)
+    num_subsets = max(1, getattr(args, "num_subsets", 1))
+
+    mask_dir = os.path.join(output_dir, "adaptive_masks")
+    os.makedirs(mask_dir, exist_ok=True)
+    jsonl_path = os.path.join(output_dir, f"adaptive_metadata_{subset_idx:05d}.jsonl")
+    csv_rows = []
+
+    with open(jsonl_path, "w") as meta_f:
+        for global_idx, prompt in enumerate(prompts):
+            if args.num_prompts is not None and global_idx >= args.num_prompts:
+                break
+            if (global_idx % num_subsets) != subset_idx:
+                continue
+
+            plan = policy.plan_image(
+                prompt=prompt,
+                height=args.height,
+                width=args.width,
+                device=pipe.device,
+                num_inference_steps=args.num_inference_steps,
+                lr_factor=lr_factor,
+            )
+            image_name = f"img_{global_idx:010d}.png"
+            mask_name = f"mask_{global_idx:010d}.png"
+            mask_path = os.path.join(mask_dir, mask_name)
+            _save_mask_image(plan.full_res_mask, pipe, args, mask_path)
+
+            print(
+                f"[ours_adaptive] prompt {global_idx:010d}: "
+                f"policy={plan.policy} beta={plan.beta:.3f} "
+                f"HR={plan.hr_fraction:.3f} tokens={plan.token_ratio:.3f}"
+            )
+            image = _pipe_call(
+                pipe,
+                args,
+                prompt,
+                plan.token_mask,
+                full_res_foveation_mask=plan.full_res_mask,
+            )
+            image.save(os.path.join(output_dir, image_name))
+
+            metadata = plan.to_jsonable()
+            metadata.update({
+                "image": image_name,
+                "prompt": prompt,
+                "mask": os.path.relpath(mask_path, output_dir),
+            })
+            meta_f.write(json.dumps(metadata) + "\n")
+            csv_rows.append({
+                "image": image_name,
+                "prompt": prompt,
+                "mask": os.path.relpath(mask_path, output_dir),
+                "policy": plan.policy,
+                "beta": plan.beta,
+                "hr_fraction": plan.hr_fraction,
+                "token_ratio": plan.token_ratio,
+                "centers": json.dumps(metadata["centers"]),
+                "radii": json.dumps(metadata["radii"]),
+            })
+
+    pd.DataFrame(csv_rows).to_csv(
+        os.path.join(output_dir, f"metadata_{subset_idx:05d}.csv"), index=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +548,7 @@ EXPERIMENTS = {
     "high_res": run_single_prompt_experiment,
     "naive_mixed_res": run_single_prompt_experiment,
     "ours": run_single_prompt_experiment,
+    "ours_adaptive": run_adaptive_policy_experiment,
     "circular_traj": run_circular_traj,
     "vary_radius": run_vary_radius,
     "runtime": run_runtime_experiments,

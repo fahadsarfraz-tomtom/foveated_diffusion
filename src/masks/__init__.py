@@ -17,3 +17,17 @@ from .state import (
     build_state,
     pack_resolution_masks,
 )
+from .adaptive import (
+    AdaptiveFoveationConfig,
+    AdaptiveFoveationPolicy,
+    FoveationPlan,
+    adaptive_config_from_args,
+    nafo_beta,
+    resolve_static_beta,
+    token_ratio_from_mask,
+)
+from .fpm import (
+    FovealPredictionModule,
+    SpatialTokenScorer,
+    gaussian_weight_map,
+)

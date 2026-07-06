@@ -19,6 +19,7 @@ version (paper-figure style) drawn via
 ``src.inference.visualize.draw_foveation_circle_on_frames``.
 """
 
+import json
 import os
 import time
 
@@ -26,6 +27,7 @@ import torch
 
 from diffsynth.utils.data import save_video
 
+from ..masks import AdaptiveFoveationPolicy, adaptive_config_from_args
 from ..masks.paths import sample_random_path, sample_spline_path
 from ..masks.state import build_state
 from .args import DEFAULT_VIDEO_NEGATIVE_PROMPT
@@ -36,8 +38,8 @@ def _negative_prompt(args):
     return getattr(args, "negative_prompt", None) or DEFAULT_VIDEO_NEGATIVE_PROMPT
 
 
-def _build_foveation_state_for_args(args, device):
-    """Build a (FoveationState, centers, radii) triple from CLI args.
+def _build_foveation_state_for_args(args, device, prompt=None):
+    """Build a (FoveationState, centers, radii, metadata) tuple from CLI args.
 
     Uses ``args.foveation_trajectory`` to pick the path sampler. Returns
     centers and radii too so the circle-overlay can be drawn later.
@@ -45,12 +47,29 @@ def _build_foveation_state_for_args(args, device):
     latent_length = (args.num_frames - 1) // 4 + 1
     if args.foveation_trajectory == "random_path":
         centers, radii = sample_random_path(latent_length, device=device)
+        metadata = {"trajectory": "random_path"}
+    elif args.foveation_trajectory == "adaptive":
+        policy = AdaptiveFoveationPolicy(adaptive_config_from_args(args))
+        centers, radii, metadata = policy.plan_video(
+            prompt or "",
+            args.height,
+            args.width,
+            args.num_frames,
+            device,
+            lr_factor=getattr(args, "lr_downsample_factor", 2),
+        )
+        metadata["trajectory"] = "adaptive"
     else:  # default: spline
         centers, radii = sample_spline_path(latent_length)
+        metadata = {"trajectory": "spline"}
     foveation_state = build_state(
         centers, radii, args.height, args.width, args.num_frames, device=device,
     )
-    return foveation_state, centers, radii
+    metadata["token_ratio"] = float(
+        foveation_state.packed_hr_positions.numel()
+        / (((args.num_frames - 1) // 4 + 1) * (args.height // 16) * (args.width // 16))
+    )
+    return foveation_state, centers, radii, metadata
 
 
 def _resolve_prompt(args):
@@ -80,6 +99,19 @@ def _save_with_overlay(args, video, output_dir, basename, centers=None, radii=No
         print(f"[video_experiments] saved -> {circle_path}")
 
 
+def _save_foveation_metadata(output_dir, basename, prompt, centers, radii, metadata):
+    path = os.path.join(output_dir, f"{basename}_foveation.json")
+    payload = {
+        "prompt": prompt,
+        "centers": [[float(x), float(y)] for x, y in centers],
+        "radii": [float(r) for r in radii],
+        "metadata": metadata,
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"[video_experiments] saved -> {path}")
+
+
 def run_high_res(pipe, args, output_dir):
     """Vanilla Wan baseline — no foveation. The foveated DiT falls through
     to the standard rope_apply path when ``foveation_state=None``."""
@@ -94,29 +126,49 @@ def run_high_res(pipe, args, output_dir):
 def run_naive(pipe, args, output_dir):
     """Naive baseline — spline FoveationState, no LoRA. Shows HR/LR seams."""
     prompt = _resolve_prompt(args)
-    foveation_state, centers, radii = _build_foveation_state_for_args(args, pipe.device)
+    foveation_state, centers, radii, metadata = _build_foveation_state_for_args(args, pipe.device, prompt)
     print(f"[naive] FoveationState built ({args.foveation_trajectory}), token_ratio="
-          f"{(foveation_state.packed_hr_positions.numel()) / (((args.num_frames-1)//4+1) * (args.height//16) * (args.width//16)):.3f}")
+          f"{metadata['token_ratio']:.3f}")
     t0 = time.time()
     video = _generate(pipe, args, prompt, foveation_state=foveation_state)
     print(f"[naive] gen done in {time.time() - t0:.1f}s")
     _save_with_overlay(args, video, output_dir, "naive", centers=centers, radii=radii)
+    _save_foveation_metadata(output_dir, "naive", prompt, centers, radii, metadata)
 
 
 def run_ours(pipe, args, output_dir):
     """Foveated headline — spline FoveationState + LoRA. LoRA load is handled
     by the pipeline loader; this runner just generates."""
     prompt = _resolve_prompt(args)
-    foveation_state, centers, radii = _build_foveation_state_for_args(args, pipe.device)
-    print(f"[ours] FoveationState built ({args.foveation_trajectory})")
+    foveation_state, centers, radii, metadata = _build_foveation_state_for_args(args, pipe.device, prompt)
+    print(f"[ours] FoveationState built ({args.foveation_trajectory}), token_ratio={metadata['token_ratio']:.3f}")
     t0 = time.time()
     video = _generate(pipe, args, prompt, foveation_state=foveation_state)
     print(f"[ours] gen done in {time.time() - t0:.1f}s")
     _save_with_overlay(args, video, output_dir, "ours", centers=centers, radii=radii)
+    _save_foveation_metadata(output_dir, "ours", prompt, centers, radii, metadata)
+
+
+def run_ours_adaptive(pipe, args, output_dir):
+    """Our adaptive foveation policy on top of Chao's Wan video foveation state."""
+    prompt = _resolve_prompt(args)
+    original_trajectory = args.foveation_trajectory
+    args.foveation_trajectory = "adaptive"
+    try:
+        foveation_state, centers, radii, metadata = _build_foveation_state_for_args(args, pipe.device, prompt)
+    finally:
+        args.foveation_trajectory = original_trajectory
+    print(f"[ours_adaptive] FoveationState built, token_ratio={metadata['token_ratio']:.3f}")
+    t0 = time.time()
+    video = _generate(pipe, args, prompt, foveation_state=foveation_state)
+    print(f"[ours_adaptive] gen done in {time.time() - t0:.1f}s")
+    _save_with_overlay(args, video, output_dir, "ours_adaptive", centers=centers, radii=radii)
+    _save_foveation_metadata(output_dir, "ours_adaptive", prompt, centers, radii, metadata)
 
 
 VIDEO_EXPERIMENTS = {
     "high_res": run_high_res,
     "naive": run_naive,
     "ours": run_ours,
+    "ours_adaptive": run_ours_adaptive,
 }
