@@ -19,12 +19,14 @@ def gaussian_weight_map(
     r: torch.Tensor,
     height: int,
     width: int,
+    slot_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build a normalized K-Gaussian foveal map.
 
     Args:
         cx, cy, r: tensors shaped [B, K]. Coordinates are normalized to [0, 1].
         height, width: output grid size.
+        slot_weights: optional [B, K] weights, typically sigmoid objectness.
 
     Returns:
         Tensor [B, height, width] with values in [0, 1].
@@ -37,7 +39,10 @@ def gaussian_weight_map(
     cy = cy.view(batch, num_fix, 1, 1)
     r = r.view(batch, num_fix, 1, 1).clamp_min(1e-4)
     dist2 = (xx - cx) ** 2 + (yy - cy) ** 2
-    weight = torch.exp(-dist2 / (2 * r ** 2)).sum(dim=1)
+    weight = torch.exp(-dist2 / (2 * r ** 2))
+    if slot_weights is not None:
+        weight = weight * slot_weights.view(batch, num_fix, 1, 1).to(dtype=weight.dtype)
+    weight = weight.sum(dim=1)
     return weight / weight.amax(dim=(-2, -1), keepdim=True).clamp_min(1e-6)
 
 
@@ -162,7 +167,14 @@ class FovealPredictionModule(nn.Module):
 
         out_height = out_height or grid_h
         out_width = out_width or grid_w
-        weight = gaussian_weight_map(cx, cy, r, out_height, out_width)
+        weight = gaussian_weight_map(
+            cx,
+            cy,
+            r,
+            out_height,
+            out_width,
+            slot_weights=torch.sigmoid(object_logits),
+        )
         return cx, cy, r, object_logits, weight
 
     def forward(

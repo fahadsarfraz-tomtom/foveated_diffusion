@@ -35,6 +35,12 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 MAX_STEPS="${MAX_STEPS:-20000}"
 LEARNING_RATE="${LEARNING_RATE:-3e-4}"
 SAVE_STEPS="${SAVE_STEPS:-1000}"
+LAMBDA_CENTER="${LAMBDA_CENTER:-2.0}"
+LAMBDA_RADIUS="${LAMBDA_RADIUS:-0.5}"
+LAMBDA_OBJECT="${LAMBDA_OBJECT:-1.0}"
+LAMBDA_MAP="${LAMBDA_MAP:-1.0}"
+LAMBDA_BUDGET="${LAMBDA_BUDGET:-0.1}"
+LAMBDA_REPULSION="${LAMBDA_REPULSION:-0.01}"
 
 WANDB_ARGS=""
 if [[ "${USE_WANDB}" == "1" ]]; then
@@ -44,7 +50,7 @@ if [[ "${USE_WANDB}" == "1" ]]; then
   fi
 fi
 
-CMD="set -euo pipefail; export PYTHONUNBUFFERED=1; export WANDB_DIR=/data/bucket/wandb; export WANDB_MODE=online; SRC_FILE=\"\"; for i in \$(seq 1 60); do SRC_FILE=\$(find ${GIT_MOUNT} -maxdepth 5 -type f -name train_fpm_coco.py | head -1); test -n \"\$SRC_FILE\" && break; echo \"waiting for git-sync ${GIT_MOUNT} \$i\"; sleep 2; done; test -n \"\$SRC_FILE\" || { echo \"missing train_fpm_coco.py in ${GIT_MOUNT}; push/check GIT_REPOSITORY and GIT_REV\"; find ${GIT_MOUNT} -maxdepth 4 -type f | head -20 || true; exit 66; }; SRC_DIR=\$(dirname \"\$SRC_FILE\"); cd \"\$SRC_DIR\"; test -d \"${COCO_ROOT}/train2017\" || { echo \"missing COCO train2017 under ${COCO_ROOT}\"; exit 67; }; mkdir -p \"${OUTPUT_DIR}\" /data/bucket/wandb; python -m pip install -q -r requirements.txt; python train_fpm_coco.py --coco_root \"${COCO_ROOT}\" --split train2017 --output_dir \"${OUTPUT_DIR}\" --image_size ${IMAGE_SIZE} --latent_size ${LATENT_SIZE} --num_fixations ${NUM_FIXATIONS} --hidden_dim ${HIDDEN_DIM} --text_dim ${TEXT_DIM} --batch_size ${BATCH_SIZE} --num_workers ${NUM_WORKERS} --max_steps ${MAX_STEPS} --learning_rate ${LEARNING_RATE} --save_steps ${SAVE_STEPS} ${WANDB_ARGS}"
+CMD="set -euo pipefail; export PYTHONUNBUFFERED=1; export WANDB_DIR=/data/bucket/wandb; export WANDB_MODE=online; SRC_FILE=\"\"; for i in \$(seq 1 60); do SRC_FILE=\$(find ${GIT_MOUNT} -maxdepth 5 -type f -name train_fpm_coco.py | head -1); test -n \"\$SRC_FILE\" && break; echo \"waiting for git-sync ${GIT_MOUNT} \$i\"; sleep 2; done; test -n \"\$SRC_FILE\" || { echo \"missing train_fpm_coco.py in ${GIT_MOUNT}; push/check GIT_REPOSITORY and GIT_REV\"; find ${GIT_MOUNT} -maxdepth 4 -type f | head -20 || true; exit 66; }; SRC_DIR=\$(dirname \"\$SRC_FILE\"); cd \"\$SRC_DIR\"; test -d \"${COCO_ROOT}/train2017\" || { echo \"missing COCO train2017 under ${COCO_ROOT}\"; exit 67; }; mkdir -p \"${OUTPUT_DIR}\" /data/bucket/wandb; python -m pip install -q -r requirements.txt; python train_fpm_coco.py --coco_root \"${COCO_ROOT}\" --split train2017 --output_dir \"${OUTPUT_DIR}\" --image_size ${IMAGE_SIZE} --latent_size ${LATENT_SIZE} --num_fixations ${NUM_FIXATIONS} --hidden_dim ${HIDDEN_DIM} --text_dim ${TEXT_DIM} --batch_size ${BATCH_SIZE} --num_workers ${NUM_WORKERS} --max_steps ${MAX_STEPS} --learning_rate ${LEARNING_RATE} --save_steps ${SAVE_STEPS} --lambda_center ${LAMBDA_CENTER} --lambda_radius ${LAMBDA_RADIUS} --lambda_object ${LAMBDA_OBJECT} --lambda_map ${LAMBDA_MAP} --lambda_budget ${LAMBDA_BUDGET} --lambda_repulsion ${LAMBDA_REPULSION} ${WANDB_ARGS}"
 
 echo "[submit] ${JOB_NAME}"
 runai training submit "${JOB_NAME}" \
