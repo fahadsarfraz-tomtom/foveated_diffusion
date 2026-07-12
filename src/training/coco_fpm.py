@@ -317,6 +317,8 @@ def fpm_supervision_loss(
     lambda_map: float = 1.0,
     lambda_budget: float = 0.1,
     lambda_repulsion: float = 0.01,
+    lambda_area: float = 0.0,
+    target_budget_scale: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """DETR-style slot matching plus map/budget supervision for FPM."""
     batch, num_slots = cx.shape
@@ -368,6 +370,9 @@ def fpm_supervision_loss(
     )
     map_loss = map_mse + dice.mean()
     budget_loss = F.mse_loss(weight_map.mean(dim=(-2, -1)), target_map.mean(dim=(-2, -1)))
+    target_budget = target_map.mean(dim=(-2, -1)) * target_budget_scale
+    area_overrun = torch.relu(weight_map.mean(dim=(-2, -1)) - target_budget)
+    area_loss = (area_overrun ** 2).mean()
 
     repulsion_loss = object_logits.new_tensor(0.0)
     if num_slots > 1:
@@ -383,6 +388,7 @@ def fpm_supervision_loss(
         + lambda_map * map_loss
         + lambda_budget * budget_loss
         + lambda_repulsion * repulsion_loss
+        + lambda_area * area_loss
     )
     metrics = {
         "loss": float(total.detach().item()),
@@ -392,6 +398,9 @@ def fpm_supervision_loss(
         "loss_map": float(map_loss.detach().item()),
         "loss_budget": float(budget_loss.detach().item()),
         "loss_repulsion": float(repulsion_loss.detach().item()),
+        "loss_area": float(area_loss.detach().item()),
+        "pred_area": float(weight_map.mean().detach().item()),
+        "target_area": float(target_map.mean().detach().item()),
         "matched_slots": float(matched_count),
         "center_l1": center_error_sum / max(matched_count, 1),
         "target_count": float(target_valid.sum().item() / max(batch, 1)),

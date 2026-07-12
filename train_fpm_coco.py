@@ -44,6 +44,9 @@ def parse_args():
     parser.add_argument("--max_tokens", type=int, default=32)
     parser.add_argument("--caption_mode", type=str, default="all", choices=["all", "first"])
     parser.add_argument("--no_fallback_all_objects", action="store_true")
+    parser.add_argument("--target_radius_margin", type=float, default=1.35)
+    parser.add_argument("--target_radius_min", type=float, default=0.03)
+    parser.add_argument("--target_radius_max", type=float, default=0.60)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -60,6 +63,8 @@ def parse_args():
     parser.add_argument("--lambda_map", type=float, default=1.0)
     parser.add_argument("--lambda_budget", type=float, default=0.1)
     parser.add_argument("--lambda_repulsion", type=float, default=0.01)
+    parser.add_argument("--lambda_area", type=float, default=0.0)
+    parser.add_argument("--target_budget_scale", type=float, default=1.0)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="foveation-diffusion")
     parser.add_argument("--wandb_entity", type=str, default=None)
@@ -219,6 +224,9 @@ def main():
         vocab_size=args.vocab_size,
         caption_mode=args.caption_mode,
         fallback_all_objects=not args.no_fallback_all_objects,
+        radius_margin=args.target_radius_margin,
+        radius_min=args.target_radius_min,
+        radius_max=args.target_radius_max,
         max_samples=args.max_samples,
     )
     if len(dataset) == 0:
@@ -306,6 +314,8 @@ def main():
                 lambda_map=args.lambda_map,
                 lambda_budget=args.lambda_budget,
                 lambda_repulsion=args.lambda_repulsion,
+                lambda_area=args.lambda_area,
+                target_budget_scale=args.target_budget_scale,
             )
 
             optimizer.zero_grad(set_to_none=True)
