@@ -105,7 +105,6 @@ def load_flux_vae_pipeline(
 ) -> FluxVaeBundle:
     """Load only the DiffSynth FLUX2 VAE plus the matching flow scheduler."""
     try:
-        from diffsynth.core import ModelConfig
         from diffsynth.diffusion import FlowMatchScheduler
         from diffsynth.models.model_loader import ModelPool
     except ImportError as exc:
@@ -114,25 +113,45 @@ def load_flux_vae_pipeline(
             "`diffsynth` package, or run this script in the SPIKE foveation image."
         ) from exc
 
-    model_config = ModelConfig(
-        model_id=model_id,
-        origin_file_pattern="vae/diffusion_pytorch_model.safetensors",
-        download_source=download_source,
-        local_model_path=str(model_cache_dir) if model_cache_dir is not None else None,
-        onload_device=device,
-        onload_dtype=dtype,
-        preparing_device=device,
-        preparing_dtype=dtype,
-        computation_device=device,
-        computation_dtype=dtype,
-    )
-    model_config.download_if_necessary()
+    if download_source == "huggingface":
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise ImportError("`huggingface_hub` is required for --download_source huggingface") from exc
+        local_dir = None
+        if model_cache_dir is not None:
+            local_dir = Path(model_cache_dir) / model_id
+            local_dir.mkdir(parents=True, exist_ok=True)
+        vae_path = hf_hub_download(
+            repo_id=model_id,
+            filename="vae/diffusion_pytorch_model.safetensors",
+            local_dir=str(local_dir) if local_dir is not None else None,
+        )
+    else:
+        from diffsynth.core import ModelConfig
+
+        model_config = ModelConfig(
+            model_id=model_id,
+            origin_file_pattern="vae/diffusion_pytorch_model.safetensors",
+            download_source=download_source,
+            local_model_path=str(model_cache_dir) if model_cache_dir is not None else None,
+        )
+        model_config.download_if_necessary()
+        vae_path = model_config.path
+
     model_pool = ModelPool()
     vram_config = model_pool.default_vram_config()
-    for key, value in model_config.vram_config().items():
-        if value is not None:
-            vram_config[key] = value
-    model_pool.auto_load_model(model_config.path, vram_config=vram_config)
+    vram_config.update(
+        {
+            "onload_device": device,
+            "onload_dtype": dtype,
+            "preparing_device": device,
+            "preparing_dtype": dtype,
+            "computation_device": device,
+            "computation_dtype": dtype,
+        }
+    )
+    model_pool.auto_load_model(vae_path, vram_config=vram_config)
     vae = model_pool.fetch_model("flux2_vae")
     if vae is None:
         raise RuntimeError(f"failed to load FLUX VAE for model_id={model_id}")
