@@ -15,6 +15,10 @@ Default layout:
         region_descriptions.json
         objects_v1_2.json
         ...
+      lvis/
+        annotations/
+        lvis_v1_train.json
+        lvis_v1_val.json
       _archives/
 
 The files are large. COCO train+val+annotations is about 20GB compressed;
@@ -63,6 +67,14 @@ VG_ANNOTATION_URLS = {
     ),
     "scene_graphs.json.zip": (
         "https://homes.cs.washington.edu/~ranjay/visualgenome/data/dataset/scene_graphs.json.zip"
+    ),
+}
+
+LVIS_ANNOTATION_URLS = {
+    "lvis_v1_train.json.zip": "https://dl.fbaipublicfiles.com/LVIS/lvis_v1_train.json.zip",
+    "lvis_v1_val.json.zip": "https://dl.fbaipublicfiles.com/LVIS/lvis_v1_val.json.zip",
+    "lvis_v1_image_info_test_dev.json.zip": (
+        "https://dl.fbaipublicfiles.com/LVIS/lvis_v1_image_info_test_dev.json.zip"
     ),
 }
 
@@ -134,6 +146,16 @@ def setup_visual_genome(
             extract_zip(zip_path, vg_dir, skip_existing=skip_existing)
 
 
+def setup_lvis(root: Path, archive_dir: Path, no_extract: bool, skip_existing: bool):
+    lvis_dir = root / "lvis" / "annotations"
+    lvis_archive = archive_dir / "lvis"
+    for name, url in LVIS_ANNOTATION_URLS.items():
+        zip_path = lvis_archive / name
+        download(url, zip_path, skip_existing=skip_existing)
+        if not no_extract:
+            extract_zip(zip_path, lvis_dir, skip_existing=skip_existing)
+
+
 def write_manifest(root: Path, datasets: list[str], skip_vg_images: bool):
     manifest = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -146,6 +168,7 @@ def write_manifest(root: Path, datasets: list[str], skip_vg_images: bool):
         "visual_genome_annotation_urls": (
             VG_ANNOTATION_URLS if "visual_genome" in datasets else {}
         ),
+        "lvis_annotation_urls": LVIS_ANNOTATION_URLS if "lvis" in datasets else {},
     }
     path = root / "dataset_manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,7 +183,7 @@ def parse_args():
         "--datasets",
         nargs="+",
         default=["coco", "visual_genome"],
-        choices=["coco", "visual_genome"],
+        choices=["coco", "visual_genome", "lvis"],
     )
     parser.add_argument("--archive-dir", type=Path, default=None)
     parser.add_argument("--no-extract", action="store_true")
@@ -190,6 +213,8 @@ def main():
             skip_existing,
             skip_images=args.skip_vg_images,
         )
+    if "lvis" in args.datasets:
+        setup_lvis(root, archive_dir, args.no_extract, skip_existing)
     write_manifest(root, args.datasets, args.skip_vg_images)
     print("[done]")
 

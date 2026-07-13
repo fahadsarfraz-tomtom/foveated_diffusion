@@ -13,6 +13,7 @@ from .coco_fpm import (
     fpm_supervision_loss,
     target_gaussian_map,
 )
+from .lvis_fpm import LvisFoveationDataset, lvis_foveation_collate
 
 try:
     from .module import Flux2FoveatedImageTrainingModule
