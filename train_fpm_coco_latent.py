@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument("--split", type=str, default="train2017")
     parser.add_argument("--output_dir", type=Path, default=Path("models/fpm_coco_latent"))
     parser.add_argument("--model_id", type=str, default="black-forest-labs/FLUX.2-klein-base-4B")
+    parser.add_argument("--model_cache_dir", type=Path, default=None)
+    parser.add_argument("--download_source", type=str, default="huggingface", choices=["huggingface", "modelscope"])
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--mask_size", type=int, default=None)
     parser.add_argument("--num_train_timesteps", type=int, default=1000)
@@ -94,7 +96,13 @@ def _dtype_from_name(name: str) -> torch.dtype:
     }[name]
 
 
-def load_flux_vae_pipeline(model_id: str, device: torch.device, dtype: torch.dtype) -> FluxVaeBundle:
+def load_flux_vae_pipeline(
+    model_id: str,
+    device: torch.device,
+    dtype: torch.dtype,
+    model_cache_dir: str | Path | None = None,
+    download_source: str = "huggingface",
+) -> FluxVaeBundle:
     """Load only the DiffSynth FLUX2 VAE plus the matching flow scheduler."""
     try:
         from diffsynth.core import ModelConfig
@@ -109,6 +117,8 @@ def load_flux_vae_pipeline(model_id: str, device: torch.device, dtype: torch.dty
     model_config = ModelConfig(
         model_id=model_id,
         origin_file_pattern="vae/diffusion_pytorch_model.safetensors",
+        download_source=download_source,
+        local_model_path=str(model_cache_dir) if model_cache_dir is not None else None,
         onload_device=device,
         onload_dtype=dtype,
         preparing_device=device,
@@ -179,7 +189,13 @@ def main():
 
     device = torch.device(args.device)
     vae_dtype = _dtype_from_name(args.vae_dtype)
-    pipe = load_flux_vae_pipeline(args.model_id, device=device, dtype=vae_dtype)
+    pipe = load_flux_vae_pipeline(
+        args.model_id,
+        device=device,
+        dtype=vae_dtype,
+        model_cache_dir=args.model_cache_dir,
+        download_source=args.download_source,
+    )
     pipe.scheduler.set_timesteps(args.num_train_timesteps, training=True)
 
     dataset = CocoFoveationDataset(
