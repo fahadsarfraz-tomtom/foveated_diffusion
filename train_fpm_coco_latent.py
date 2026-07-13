@@ -10,6 +10,7 @@ from the same flow-match scheduler used by Chao's FLUX2 pipeline.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
@@ -26,6 +27,14 @@ from src.training.coco_fpm import (
     target_gaussian_map,
 )
 from train_fpm_coco import _init_wandb, _log_wandb_examples, save_checkpoint
+
+
+@dataclass
+class FluxVaeBundle:
+    vae: torch.nn.Module
+    scheduler: object
+    device: torch.device
+    torch_dtype: torch.dtype
 
 
 def parse_args():
@@ -85,32 +94,44 @@ def _dtype_from_name(name: str) -> torch.dtype:
     }[name]
 
 
-def load_flux_vae_pipeline(model_id: str, device: torch.device, dtype: torch.dtype):
-    """Load the Chao/DiffSynth FLUX2 pipeline with only the VAE model config."""
+def load_flux_vae_pipeline(model_id: str, device: torch.device, dtype: torch.dtype) -> FluxVaeBundle:
+    """Load only the DiffSynth FLUX2 VAE plus the matching flow scheduler."""
     try:
         from diffsynth.core import ModelConfig
-        from src.diffsynth_fov.pipeline import Flux2FoveatedImagePipeline
+        from diffsynth.diffusion import FlowMatchScheduler
+        from diffsynth.models.model_loader import ModelPool
     except ImportError as exc:
         raise ImportError(
             "Latent FPM training requires DiffSynth-Studio. Install/provide the "
             "`diffsynth` package, or run this script in the SPIKE foveation image."
         ) from exc
 
-    pipe = Flux2FoveatedImagePipeline.from_pretrained(
-        torch_dtype=dtype,
-        device=device,
-        model_configs=[
-            ModelConfig(model_id=model_id, origin_file_pattern="vae/diffusion_pytorch_model.safetensors"),
-        ],
-        tokenizer_config=None,
+    model_config = ModelConfig(
+        model_id=model_id,
+        origin_file_pattern="vae/diffusion_pytorch_model.safetensors",
+        onload_device=device,
+        onload_dtype=dtype,
+        preparing_device=device,
+        preparing_dtype=dtype,
+        computation_device=device,
+        computation_dtype=dtype,
     )
-    if pipe.vae is None:
+    model_config.download_if_necessary()
+    model_pool = ModelPool()
+    vram_config = model_pool.default_vram_config()
+    for key, value in model_config.vram_config().items():
+        if value is not None:
+            vram_config[key] = value
+    model_pool.auto_load_model(model_config.path, vram_config=vram_config)
+    vae = model_pool.fetch_model("flux2_vae")
+    if vae is None:
         raise RuntimeError(f"failed to load FLUX VAE for model_id={model_id}")
-    pipe.scheduler.set_timesteps(1000, training=True)
-    pipe.vae.eval()
-    for param in pipe.vae.parameters():
+    scheduler = FlowMatchScheduler("FLUX.2")
+    scheduler.set_timesteps(1000, training=True)
+    vae.eval()
+    for param in vae.parameters():
         param.requires_grad_(False)
-    return pipe
+    return FluxVaeBundle(vae=vae, scheduler=scheduler, device=device, torch_dtype=dtype)
 
 
 def spatial_to_sequence(latents: torch.Tensor) -> torch.Tensor:
