@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "saliency (fov_saliency.safetensors), "
                         "bbox (fov_bbox.safetensors).")
     p.add_argument("--dit_checkpoint", default=None, type=str, help="Path to full DiT checkpoint")
+    p.add_argument("--model_cache_dir", type=str, default=None,
+                   help="Persistent root for DiffSynth model downloads. Required on cluster "
+                        "jobs where the CWD (git mount) is read-only.")
+    p.add_argument("--download_source", type=str, default="huggingface",
+                   choices=["huggingface", "modelscope"],
+                   help="Model download source when --model_cache_dir is set.")
 
     # Generation
     p.add_argument("--height", type=int, default=1024)

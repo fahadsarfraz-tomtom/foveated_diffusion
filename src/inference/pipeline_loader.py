@@ -62,15 +62,23 @@ def load_pipeline(args, use_foveated_pipeline: bool = True):
     print("Loading FLUX2 foveated pipeline...")
     pipeline_class = Flux2FoveatedImagePipeline if use_foveated_pipeline else Flux2ImagePipeline
     model_id = args.model_id or "black-forest-labs/FLUX.2-klein-base-4B"
+    # Without local_model_path, DiffSynth downloads into a relative "models/"
+    # dir under the CWD — which is a read-only git mount on cluster jobs.
+    download_kwargs = {}
+    if getattr(args, "model_cache_dir", None):
+        download_kwargs = {
+            "local_model_path": args.model_cache_dir,
+            "download_source": getattr(args, "download_source", "huggingface"),
+        }
     pipe = pipeline_class.from_pretrained(
         torch_dtype=torch.bfloat16,
         device="cuda" if torch.cuda.is_available() else "cpu",
         model_configs=[
-            ModelConfig(model_id=model_id, origin_file_pattern="transformer/*.safetensors"),
-            ModelConfig(model_id=model_id, origin_file_pattern="text_encoder/*.safetensors"),
-            ModelConfig(model_id=model_id, origin_file_pattern="vae/diffusion_pytorch_model.safetensors"),
+            ModelConfig(model_id=model_id, origin_file_pattern="transformer/*.safetensors", **download_kwargs),
+            ModelConfig(model_id=model_id, origin_file_pattern="text_encoder/*.safetensors", **download_kwargs),
+            ModelConfig(model_id=model_id, origin_file_pattern="vae/diffusion_pytorch_model.safetensors", **download_kwargs),
         ],
-        tokenizer_config=ModelConfig(model_id=model_id, origin_file_pattern="tokenizer/"),
+        tokenizer_config=ModelConfig(model_id=model_id, origin_file_pattern="tokenizer/", **download_kwargs),
     )
 
     # These experiments generate LoRA-free baselines first and load the LoRA
