@@ -84,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=[
                        # image experiments
                        "high_res", "naive_mixed_res", "ours", "ours_adaptive",
+                       "mask_source_comparison",
                        "circular_traj", "vary_radius",
                        "runtime", "foveation_trajectory_grid",
                        "user_study",
@@ -138,10 +139,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Adaptive foveation policy (ours)
     p.add_argument("--adaptive_policy", type=str, default="prompt_hash",
-                   choices=["center", "prompt_hash", "lsca_proxy", "textfov_proxy"],
-                   help="Adaptive policy source. `lsca_proxy` is a deterministic stand-in "
-                        "until a trained FPM checkpoint is available; `textfov_proxy` "
-                        "uses spatial prompt-token heuristics.")
+                   choices=["center", "prompt_hash", "lsca_proxy", "textfov_proxy", "fpm"],
+                   help="Adaptive policy source. `fpm` uses a trained FPM checkpoint "
+                        "(--fpm_checkpoint); `lsca_proxy` is its deterministic stand-in; "
+                        "`textfov_proxy` uses spatial prompt-token heuristics.")
+    p.add_argument("--fpm_checkpoint", type=str, default=None,
+                   help="Path to a trained FPM checkpoint (train_fpm_coco[_latent].py "
+                        "save_checkpoint format). Required for --adaptive_policy fpm and "
+                        "for the fpm arm of mask_source_comparison.")
+    p.add_argument("--fpm_objectness_threshold", type=float, default=0.5,
+                   help="Objectness gate for FPM slots; slots below it are dropped "
+                        "(the strongest slot is always kept).")
+    p.add_argument("--fpm_timestep_id", type=int, default=0,
+                   help="Scheduler timestep index the FPM is conditioned on in prior "
+                        "mode (0 = noisiest, matching training's timestep_id indexing).")
+
+    # Matched-budget mask-source comparison (FGD-018)
+    p.add_argument("--comparison_arms", type=str, nargs="+",
+                   default=["center", "random", "saliency", "fpm"],
+                   help="Foveated arms for mask_source_comparison. Each arm uses the "
+                        "same HR token budget; only the mask source differs.")
+    p.add_argument("--comparison_beta", type=float, default=0.25,
+                   help="Shared HR token fraction (beta) for all comparison arms.")
     p.add_argument("--adaptive_num_fixations", type=int, default=3,
                    help="Number of fixation centers for adaptive image masks.")
     p.add_argument("--adaptive_center_range", type=float, default=0.35,

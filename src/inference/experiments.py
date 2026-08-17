@@ -224,6 +224,168 @@ def run_adaptive_policy_experiment(pipe, args, output_dir):
 
 
 # ---------------------------------------------------------------------------
+# Matched-budget mask-source comparison (FGD-018)
+# ---------------------------------------------------------------------------
+
+def _comparison_policy_config(arm: str, args) -> "AdaptiveFoveationConfig":
+    """One-arm config: identical budget everywhere, only the mask source differs."""
+    from ..masks import AdaptiveFoveationConfig
+
+    arm_to_policy = {
+        "center": "center",
+        "random": "prompt_hash",
+        "saliency": "saliency",
+        "fpm": "fpm",
+    }
+    if arm not in arm_to_policy:
+        raise ValueError(f"unknown comparison arm: {arm!r} (valid: {sorted(arm_to_policy)})")
+    return AdaptiveFoveationConfig(
+        policy=arm_to_policy[arm],
+        num_fixations=getattr(args, "adaptive_num_fixations", 3),
+        center_range=getattr(args, "adaptive_center_range", 0.35),
+        mask_shape=getattr(args, "mask_shape", "circular"),
+        fixed_beta=args.comparison_beta,
+        beta_mode="fixed",
+        fpm_checkpoint=getattr(args, "fpm_checkpoint", None),
+        fpm_objectness_threshold=getattr(args, "fpm_objectness_threshold", 0.5),
+        fpm_timestep_id=getattr(args, "fpm_timestep_id", 0),
+    )
+
+
+def run_mask_source_comparison(pipe, args, output_dir):
+    """FGD-018: compare mask sources at a matched HR token budget.
+
+    Phase A generates full-resolution references with the base DiT (LoRA is
+    deferred by the loader) and extracts DeepGaze saliency centers from them.
+    Phase B loads the foveated LoRA once and generates one image per
+    (arm, prompt) with the same seed and the same beta; only the fixation
+    centers differ across arms. Every image row records hr_fraction and
+    token_ratio so budget matching is verifiable after the fact.
+    """
+    from PIL import Image as PILImage
+
+    prompts = _resolve_prompts(args)
+    if args.num_prompts is not None:
+        prompts = prompts[: args.num_prompts]
+    arms = list(args.comparison_arms)
+    lr_factor = getattr(args, "lr_downsample_factor", 2)
+    print(f"[mask_source_comparison] {len(prompts)} prompts, arms={arms}, beta={args.comparison_beta}")
+
+    if "fpm" in arms and not getattr(args, "fpm_checkpoint", None):
+        raise ValueError("arm 'fpm' requires --fpm_checkpoint")
+
+    # ---- Phase A: full-resolution references (base DiT, no LoRA) ----
+    highres_dir = os.path.join(output_dir, "high_res")
+    os.makedirs(highres_dir, exist_ok=True)
+    pipe.clear_lora(verbose=0)
+    highres_rows = []
+    for idx, prompt in enumerate(prompts):
+        image_name = f"img_{idx:010d}.png"
+        print(f"[high_res] {idx:03d}: {prompt[:80]}")
+        t0 = time.time()
+        image = _pipe_call(pipe, args, prompt, foveation_mask=None, decode_mode="direct")
+        image.save(os.path.join(highres_dir, image_name))
+        highres_rows.append({
+            "image": image_name, "prompt": prompt,
+            "wall_time": round(time.time() - t0, 3),
+            "vit_time": float(getattr(pipe, "vit_timing", float("nan"))),
+        })
+    pd.DataFrame(highres_rows).to_csv(os.path.join(highres_dir, "metadata_00000.csv"), index=False)
+
+    # ---- Saliency centers from the references ----
+    saliency_centers = {}
+    if "saliency" in arms:
+        from ..masks.saliency import extract_saliency_path, load_deepgaze_model
+
+        print("[saliency] extracting DeepGaze IIE centers from high-res references")
+        deepgaze = load_deepgaze_model(pipe.device)
+        for idx in range(len(prompts)):
+            pil = PILImage.open(os.path.join(highres_dir, f"img_{idx:010d}.png")).convert("RGB")
+            centers, _radii = extract_saliency_path(deepgaze, [pil], pipe.device)
+            saliency_centers[idx] = centers
+        del deepgaze
+        torch.cuda.empty_cache()
+
+    # ---- Phase B: foveated arms under one LoRA ----
+    lora_path = None
+    if args.lora_checkpoint is not None:
+        lora_path = args.lora_checkpoint
+    elif getattr(args, "lora_mode", None) is not None:
+        from .pipeline_loader import _resolve_image_lora
+
+        lora_path = _resolve_image_lora(args.lora_mode)
+    if lora_path is not None:
+        pipe.load_lora(pipe.dit, lora_path)
+        print(f"[mask_source_comparison] loaded LoRA: {lora_path}")
+    else:
+        print("[mask_source_comparison] WARNING: no LoRA — foveated arms run in the "
+              "naive (artifact-prone) regime; rankings remain internally comparable.")
+
+    for arm in arms:
+        arm_dir = os.path.join(output_dir, arm)
+        mask_dir = os.path.join(arm_dir, "masks")
+        os.makedirs(mask_dir, exist_ok=True)
+        policy = AdaptiveFoveationPolicy(_comparison_policy_config(arm, args))
+
+        rows = []
+        for idx, prompt in enumerate(prompts):
+            plan = policy.plan_image(
+                prompt=prompt,
+                height=args.height,
+                width=args.width,
+                device=pipe.device,
+                num_inference_steps=args.num_inference_steps,
+                lr_factor=lr_factor,
+                centers_override=saliency_centers.get(idx) if arm == "saliency" else None,
+            )
+            image_name = f"img_{idx:010d}.png"
+            _save_mask_image(plan.full_res_mask, pipe, args, os.path.join(mask_dir, f"mask_{idx:010d}.png"))
+            print(
+                f"[{arm}] {idx:03d}: HR={plan.hr_fraction:.3f} tokens={plan.token_ratio:.3f} "
+                f"centers={[(round(x, 2), round(y, 2)) for x, y in plan.centers]}"
+            )
+            torch.cuda.empty_cache()
+            t0 = time.time()
+            image = _pipe_call(pipe, args, prompt, plan.token_mask, full_res_foveation_mask=plan.full_res_mask)
+            wall = time.time() - t0
+            image.save(os.path.join(arm_dir, image_name))
+
+            metadata = plan.to_jsonable()
+            rows.append({
+                "image": image_name,
+                "prompt": prompt,
+                "arm": arm,
+                "policy": plan.policy,
+                "beta": plan.beta,
+                "hr_fraction": plan.hr_fraction,
+                "token_ratio": plan.token_ratio,
+                "centers": json.dumps(metadata["centers"]),
+                "radii": json.dumps(metadata["radii"]),
+                "wall_time": round(wall, 3),
+                "vit_time": float(getattr(pipe, "vit_timing", float("nan"))),
+                "extra": json.dumps({k: v for k, v in metadata.items()
+                                     if k.startswith("fpm_")}),
+            })
+        pd.DataFrame(rows).to_csv(os.path.join(arm_dir, "metadata_00000.csv"), index=False)
+
+    summary = {
+        "arms": arms,
+        "num_prompts": len(prompts),
+        "beta": args.comparison_beta,
+        "lr_downsample_factor": lr_factor,
+        "lora": lora_path,
+        "fpm_checkpoint": getattr(args, "fpm_checkpoint", None),
+        "seed": args.seed,
+        "num_inference_steps": args.num_inference_steps,
+        "height": args.height,
+        "width": args.width,
+    }
+    with open(os.path.join(output_dir, "comparison_config.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"[mask_source_comparison] done — outputs under {output_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Circular trajectory (single prompt, mask center orbits)
 # ---------------------------------------------------------------------------
 
@@ -549,6 +711,7 @@ EXPERIMENTS = {
     "naive_mixed_res": run_single_prompt_experiment,
     "ours": run_single_prompt_experiment,
     "ours_adaptive": run_adaptive_policy_experiment,
+    "mask_source_comparison": run_mask_source_comparison,
     "circular_traj": run_circular_traj,
     "vary_radius": run_vary_radius,
     "runtime": run_runtime_experiments,

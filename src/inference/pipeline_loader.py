@@ -73,7 +73,9 @@ def load_pipeline(args, use_foveated_pipeline: bool = True):
         tokenizer_config=ModelConfig(model_id=model_id, origin_file_pattern="tokenizer/"),
     )
 
-    defer_load = (args.experiment == "user_study")
+    # These experiments generate LoRA-free baselines first and load the LoRA
+    # themselves mid-run.
+    defer_load = args.experiment in ("user_study", "mask_source_comparison")
 
     lora_mode = getattr(args, "lora_mode", None)
     if args.lora_checkpoint is not None:

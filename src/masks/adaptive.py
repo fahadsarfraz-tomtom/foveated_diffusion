@@ -46,6 +46,9 @@ class AdaptiveFoveationConfig:
     beta_max: float = 0.85
     beta_schedule: str = "cosine"
     fixed_radius: float | None = None
+    fpm_checkpoint: str | None = None
+    fpm_objectness_threshold: float = 0.5
+    fpm_timestep_id: int = 0
 
 
 @dataclass
@@ -185,6 +188,11 @@ def _centers_from_prompt(prompt: str, config: AdaptiveFoveationConfig) -> list[t
             for idx in range(max(1, config.num_fixations))
         ]
 
+    if config.policy == "saliency":
+        raise ValueError(
+            "policy 'saliency' requires per-prompt centers via plan_image(centers_override=...)"
+        )
+
     raise ValueError(f"unknown adaptive policy: {config.policy}")
 
 
@@ -247,6 +255,21 @@ class AdaptiveFoveationPolicy:
 
     def __init__(self, config: AdaptiveFoveationConfig):
         self.config = config
+        self._fpm_policy = None
+
+    def _get_fpm_policy(self, device: torch.device):
+        if self._fpm_policy is None:
+            if not self.config.fpm_checkpoint:
+                raise ValueError("policy 'fpm' requires fpm_checkpoint (--fpm_checkpoint)")
+            from .fpm_policy import FpmMaskPolicy
+
+            self._fpm_policy = FpmMaskPolicy.load(
+                self.config.fpm_checkpoint,
+                device=device,
+                objectness_threshold=self.config.fpm_objectness_threshold,
+                timestep_id=self.config.fpm_timestep_id,
+            )
+        return self._fpm_policy
 
     def plan_image(
         self,
@@ -256,8 +279,17 @@ class AdaptiveFoveationPolicy:
         device: torch.device,
         num_inference_steps: int,
         lr_factor: int = 2,
+        centers_override: list[tuple[float, float]] | None = None,
     ) -> FoveationPlan:
-        centers = _centers_from_prompt(prompt, self.config)
+        policy_metadata: dict[str, Any] = {}
+        if centers_override is not None:
+            centers = [(float(x), float(y)) for x, y in centers_override]
+        elif self.config.policy == "fpm":
+            centers, _pred_radii, policy_metadata = self._get_fpm_policy(device).predict_centers(
+                prompt, device
+            )
+        else:
+            centers = _centers_from_prompt(prompt, self.config)
         beta = resolve_static_beta(self.config, num_inference_steps)
         if self.config.fixed_radius is not None:
             radius = float(self.config.fixed_radius)
@@ -279,6 +311,7 @@ class AdaptiveFoveationPolicy:
             "num_inference_steps": int(num_inference_steps),
             "lr_factor": int(lr_factor),
         }
+        metadata.update(policy_metadata)
         return FoveationPlan(
             token_mask=token_mask,
             full_res_mask=full_res_mask,
@@ -346,4 +379,7 @@ def adaptive_config_from_args(args) -> AdaptiveFoveationConfig:
         beta_max=getattr(args, "adaptive_beta_max", 0.85),
         beta_schedule=getattr(args, "adaptive_beta_schedule", "cosine"),
         fixed_radius=getattr(args, "adaptive_radius", None),
+        fpm_checkpoint=getattr(args, "fpm_checkpoint", None),
+        fpm_objectness_threshold=getattr(args, "fpm_objectness_threshold", 0.5),
+        fpm_timestep_id=getattr(args, "fpm_timestep_id", 0),
     )

@@ -31,3 +31,4 @@ from .fpm import (
     SpatialTokenScorer,
     gaussian_weight_map,
 )
+from .fpm_policy import FpmMaskPolicy
