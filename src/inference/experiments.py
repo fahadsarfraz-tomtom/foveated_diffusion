@@ -275,36 +275,52 @@ def run_mask_source_comparison(pipe, args, output_dir):
         raise ValueError("arm 'fpm' requires --fpm_checkpoint")
 
     # ---- Phase A: full-resolution references (base DiT, no LoRA) ----
+    # Preemptible cluster jobs restart from scratch, so every expensive step is
+    # skipped when its output already exists on disk (resume-by-artifact).
     highres_dir = os.path.join(output_dir, "high_res")
     os.makedirs(highres_dir, exist_ok=True)
     pipe.clear_lora(verbose=0)
     highres_rows = []
     for idx, prompt in enumerate(prompts):
         image_name = f"img_{idx:010d}.png"
-        print(f"[high_res] {idx:03d}: {prompt[:80]}")
-        t0 = time.time()
-        image = _pipe_call(pipe, args, prompt, foveation_mask=None, decode_mode="direct")
-        image.save(os.path.join(highres_dir, image_name))
+        image_path = os.path.join(highres_dir, image_name)
+        if os.path.exists(image_path):
+            print(f"[high_res] {idx:03d}: exists — skipped")
+            wall = vit = float("nan")
+        else:
+            print(f"[high_res] {idx:03d}: {prompt[:80]}")
+            t0 = time.time()
+            image = _pipe_call(pipe, args, prompt, foveation_mask=None, decode_mode="direct")
+            image.save(image_path)
+            wall = round(time.time() - t0, 3)
+            vit = float(getattr(pipe, "vit_timing", float("nan")))
         highres_rows.append({
-            "image": image_name, "prompt": prompt,
-            "wall_time": round(time.time() - t0, 3),
-            "vit_time": float(getattr(pipe, "vit_timing", float("nan"))),
+            "image": image_name, "prompt": prompt, "wall_time": wall, "vit_time": vit,
         })
     pd.DataFrame(highres_rows).to_csv(os.path.join(highres_dir, "metadata_00000.csv"), index=False)
 
-    # ---- Saliency centers from the references ----
+    # ---- Saliency centers from the references (cached across restarts) ----
     saliency_centers = {}
     if "saliency" in arms:
-        from ..masks.saliency import extract_saliency_path, load_deepgaze_model
+        saliency_cache = os.path.join(output_dir, "saliency_centers.json")
+        if os.path.exists(saliency_cache):
+            with open(saliency_cache) as f:
+                cached = json.load(f)
+            saliency_centers = {int(k): [tuple(c) for c in v] for k, v in cached.items()}
+        missing = [idx for idx in range(len(prompts)) if idx not in saliency_centers]
+        if missing:
+            from ..masks.saliency import extract_saliency_path, load_deepgaze_model
 
-        print("[saliency] extracting DeepGaze IIE centers from high-res references")
-        deepgaze = load_deepgaze_model(pipe.device)
-        for idx in range(len(prompts)):
-            pil = PILImage.open(os.path.join(highres_dir, f"img_{idx:010d}.png")).convert("RGB")
-            centers, _radii = extract_saliency_path(deepgaze, [pil], pipe.device)
-            saliency_centers[idx] = centers
-        del deepgaze
-        torch.cuda.empty_cache()
+            print(f"[saliency] extracting DeepGaze IIE centers for {len(missing)} references")
+            deepgaze = load_deepgaze_model(pipe.device)
+            for idx in missing:
+                pil = PILImage.open(os.path.join(highres_dir, f"img_{idx:010d}.png")).convert("RGB")
+                centers, _radii = extract_saliency_path(deepgaze, [pil], pipe.device)
+                saliency_centers[idx] = centers
+            del deepgaze
+            torch.cuda.empty_cache()
+            with open(saliency_cache, "w") as f:
+                json.dump({str(k): [list(c) for c in v] for k, v in saliency_centers.items()}, f)
 
     # ---- Phase B: foveated arms under one LoRA ----
     lora_path = None
@@ -339,16 +355,24 @@ def run_mask_source_comparison(pipe, args, output_dir):
                 centers_override=saliency_centers.get(idx) if arm == "saliency" else None,
             )
             image_name = f"img_{idx:010d}.png"
+            image_path = os.path.join(arm_dir, image_name)
             _save_mask_image(plan.full_res_mask, pipe, args, os.path.join(mask_dir, f"mask_{idx:010d}.png"))
-            print(
-                f"[{arm}] {idx:03d}: HR={plan.hr_fraction:.3f} tokens={plan.token_ratio:.3f} "
-                f"centers={[(round(x, 2), round(y, 2)) for x, y in plan.centers]}"
-            )
-            torch.cuda.empty_cache()
-            t0 = time.time()
-            image = _pipe_call(pipe, args, prompt, plan.token_mask, full_res_foveation_mask=plan.full_res_mask)
-            wall = time.time() - t0
-            image.save(os.path.join(arm_dir, image_name))
+            if os.path.exists(image_path):
+                # Plans are deterministic per prompt, so metadata is rebuilt
+                # exactly; only the generation itself is skipped on resume.
+                print(f"[{arm}] {idx:03d}: exists — skipped")
+                wall = vit = float("nan")
+            else:
+                print(
+                    f"[{arm}] {idx:03d}: HR={plan.hr_fraction:.3f} tokens={plan.token_ratio:.3f} "
+                    f"centers={[(round(x, 2), round(y, 2)) for x, y in plan.centers]}"
+                )
+                torch.cuda.empty_cache()
+                t0 = time.time()
+                image = _pipe_call(pipe, args, prompt, plan.token_mask, full_res_foveation_mask=plan.full_res_mask)
+                wall = round(time.time() - t0, 3)
+                vit = float(getattr(pipe, "vit_timing", float("nan")))
+                image.save(image_path)
 
             metadata = plan.to_jsonable()
             rows.append({
@@ -361,8 +385,8 @@ def run_mask_source_comparison(pipe, args, output_dir):
                 "token_ratio": plan.token_ratio,
                 "centers": json.dumps(metadata["centers"]),
                 "radii": json.dumps(metadata["radii"]),
-                "wall_time": round(wall, 3),
-                "vit_time": float(getattr(pipe, "vit_timing", float("nan"))),
+                "wall_time": wall,
+                "vit_time": vit,
                 "extra": json.dumps({k: v for k, v in metadata.items()
                                      if k.startswith("fpm_")}),
             })
