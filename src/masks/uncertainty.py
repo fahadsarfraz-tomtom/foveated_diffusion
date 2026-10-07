@@ -121,6 +121,7 @@ def mc_uncertainty_map(
     num_samples: int = 8,
     seed: int = 0,
     conditioning: Optional[dict] = None,
+    signal: str = "loss",
 ) -> tuple[torch.Tensor, dict]:
     """MC denoising-uncertainty map for one image.
 
@@ -170,11 +171,27 @@ def mc_uncertainty_map(
     pred = pipe.model_fn(**models, **inputs, timestep=timestep)
     pred = pred[:, : clean.shape[1], :]
 
+    # Primary signal: per-token denoising LOSS map — mean over draws of the
+    # squared error against the true training target (we have clean latents).
+    # This is the quantity Patch Forcing validated its difficulty head against,
+    # and it is robust where MC variance of one-step x1 drowns in bf16
+    # quantization noise (observed: structureless salt-and-pepper maps).
+    target = pipe.scheduler.training_target(
+        clean.expand(num_samples, -1, -1).float(), noise.float(), timestep,
+    )
+    loss_map = (pred.float() - target).pow(2).mean(dim=(0, -1))  # [L]
+    umap_loss = loss_map.reshape(h, w).float().cpu()
+
+    # Secondary signal: MC variance of the one-step clean estimate.
     x1_hat = solve_x1(x_t.float(), pred.float(), coeffs)
     variance = x1_hat.var(dim=0, unbiased=True).mean(dim=-1)  # [L]
-    umap = variance.reshape(h, w).float().cpu()
+    umap_mcvar = variance.reshape(h, w).float().cpu()
+
+    umap = umap_loss if signal == "loss" else umap_mcvar
 
     extras = {
+        "loss_map": umap_loss,
+        "mcvar_map": umap_mcvar,
         "timestep": float(timesteps[t_idx]),
         "timestep_index": int(t_idx),
         "timestep_frac": timestep_frac,

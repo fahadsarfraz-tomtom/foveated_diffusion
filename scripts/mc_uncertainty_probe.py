@@ -174,7 +174,9 @@ def main():
             conditioning = extras["conditioning"]
             unc = umap.numpy()
 
-            maps = {"uncertainty": unc, "saliency": sal, "boxes": box_mask}
+            maps = {"uncertainty": unc,
+                    "mcvar": extras["mcvar_map"].numpy(),
+                    "saliency": sal, "boxes": box_mask}
             if fpm_policy is not None:
                 noisy = extras["x1_noise_latent"].to(pipe.device)
                 noisy_spatial = noisy.transpose(1, 2).reshape(
