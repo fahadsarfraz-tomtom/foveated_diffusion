@@ -54,9 +54,23 @@ def load_arm_rows(run_dir: str, arm: str) -> pd.DataFrame:
     return df
 
 
+def _import_hpsv2():
+    """Import hpsv2 with a stub for its stray `from turtle import forward`
+    (turtle needs tkinter, absent in headless containers; the symbol is unused)."""
+    import sys
+    import types
+
+    if "turtle" not in sys.modules:
+        stub = types.ModuleType("turtle")
+        stub.forward = None
+        sys.modules["turtle"] = stub
+    import hpsv2
+    return hpsv2
+
+
 def main():
     args = parse_args()
-    import hpsv2  # deferred: heavy import, downloads the HPS checkpoint on first use
+    hpsv2 = _import_hpsv2()  # deferred: heavy import, downloads the HPS checkpoint on first use
 
     arms = args.arms or discover_arms(args.run_dir)
     if not arms:
