@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=[
                        # image experiments
                        "high_res", "naive_mixed_res", "ours", "ours_adaptive",
-                       "mask_source_comparison",
+                       "mask_source_comparison", "coverage_refine",
                        "circular_traj", "vary_radius",
                        "runtime", "foveation_trajectory_grid",
                        "user_study",
@@ -173,6 +173,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="MC noise draws per image for denoising-uncertainty maps.")
     p.add_argument("--uncertainty_timestep_frac", type=float, default=0.5,
                    help="Scheduler-timestep fraction at which uncertainty is probed.")
+
+    # Coverage-guided two-pass refinement (FGD-022)
+    p.add_argument("--coverage_pass1_steps", type=int, default=30)
+    p.add_argument("--coverage_pass2_steps", type=int, default=20)
+    p.add_argument("--coverage_strength", type=float, default=0.4,
+                   help="img2img denoising strength of the refinement pass.")
+    p.add_argument("--coverage_decay", type=float, default=0.8,
+                   help="How strongly already-covered tokens are suppressed in the "
+                        "pass-2 fovea score (1.0 = hard exclusion, 0.0 = coverage off).")
     p.add_argument("--adaptive_num_fixations", type=int, default=3,
                    help="Number of fixation centers for adaptive image masks.")
     p.add_argument("--adaptive_center_range", type=float, default=0.35,

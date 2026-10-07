@@ -154,8 +154,10 @@ def mc_uncertainty_map(
     noise = torch.randn(
         (num_samples, *clean.shape[1:]), generator=generator, dtype=torch.float32,
     ).to(device=pipe.device, dtype=pipe.torch_dtype)
+    # DiffSynth's FlowMatchScheduler.add_noise expects a SCALAR timestep
+    # (argmin over the schedule); all K draws share one t, latents broadcast.
     x_t = pipe.scheduler.add_noise(
-        clean.expand(num_samples, -1, -1), noise, timestep.expand(num_samples),
+        clean.expand(num_samples, -1, -1), noise, timestep,
     )
 
     pipe.load_models_to_device(pipe.in_iteration_models)
@@ -165,7 +167,7 @@ def mc_uncertainty_map(
     inputs["resolution_mask"] = None
     inputs["resolution_mask_top_left"] = None
 
-    pred = pipe.model_fn(**models, **inputs, timestep=timestep.expand(num_samples))
+    pred = pipe.model_fn(**models, **inputs, timestep=timestep)
     pred = pred[:, : clean.shape[1], :]
 
     x1_hat = solve_x1(x_t.float(), pred.float(), coeffs)

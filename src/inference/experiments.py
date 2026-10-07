@@ -25,6 +25,7 @@ from ..masks import (
     create_foveation_mask_full_res,
     gaussian_blur_mask_2d,
     generate_foveation_trajectory_masks,
+    token_ratio_from_mask,
 )
 from .visualize import (
     create_tokenization_mask_vis,
@@ -185,19 +186,23 @@ def run_adaptive_policy_experiment(pipe, args, output_dir):
             mask_path = os.path.join(mask_dir, mask_name)
             _save_mask_image(plan.full_res_mask, pipe, args, mask_path)
 
-            print(
-                f"[ours_adaptive] prompt {global_idx:010d}: "
-                f"policy={plan.policy} beta={plan.beta:.3f} "
-                f"HR={plan.hr_fraction:.3f} tokens={plan.token_ratio:.3f}"
-            )
-            image = _pipe_call(
-                pipe,
-                args,
-                prompt,
-                plan.token_mask,
-                full_res_foveation_mask=plan.full_res_mask,
-            )
-            image.save(os.path.join(output_dir, image_name))
+            image_path = os.path.join(output_dir, image_name)
+            if not os.path.exists(image_path):
+                print(
+                    f"[ours_adaptive] prompt {global_idx:010d}: "
+                    f"policy={plan.policy} beta={plan.beta:.3f} "
+                    f"HR={plan.hr_fraction:.3f} tokens={plan.token_ratio:.3f}"
+                )
+                image = _pipe_call(
+                    pipe,
+                    args,
+                    prompt,
+                    plan.token_mask,
+                    full_res_foveation_mask=plan.full_res_mask,
+                )
+                image.save(image_path)
+            else:
+                print(f"[ours_adaptive] prompt {global_idx:010d}: exists — skipped")
 
             metadata = plan.to_jsonable()
             metadata.update({
@@ -458,6 +463,149 @@ def run_mask_source_comparison(pipe, args, output_dir):
     with open(os.path.join(output_dir, "comparison_config.json"), "w") as f:
         json.dump(summary, f, indent=2)
     print(f"[mask_source_comparison] done — outputs under {output_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Coverage-guided two-pass refinement (FGD-022: D5 mechanism, D6 signal)
+# ---------------------------------------------------------------------------
+
+def run_coverage_refinement(pipe, args, output_dir):
+    """FGD-022: single-pass vs coverage-guided two-pass foveal generation.
+
+    Arms (same prompts, same seed, same per-pass budget beta):
+      - single:            one pass, N1+N2 steps, policy mask
+      - twopass_coverage:  pass 1 (N1 steps, policy mask) -> MC-uncertainty map
+        of the pass-1 output -> pass 2 fovea = top-beta of
+        uncertainty * (1 - decay * coverage), img2img at denoising_strength
+      - twopass_random:    same two-pass compute, pass-2 fovea placed
+        content-independently (isolates the coverage/uncertainty signal)
+
+    Compute is reported, not assumed matched: per-arm vit_time sums are logged.
+    """
+    from PIL import Image as PILImage
+
+    from ..masks.uncertainty import dense_mask_from_map, mc_uncertainty_map, upsample_mask_full_res
+
+    prompts = _resolve_prompts(args)
+    if args.num_prompts is not None:
+        prompts = prompts[: args.num_prompts]
+    lr_factor = getattr(args, "lr_downsample_factor", 2)
+    beta = args.comparison_beta
+    n1, n2 = args.coverage_pass1_steps, args.coverage_pass2_steps
+    print(f"[coverage_refine] {len(prompts)} prompts, beta={beta}, "
+          f"N1={n1}, N2={n2}, strength={args.coverage_strength}, decay={args.coverage_decay}")
+
+    pass1_policy = AdaptiveFoveationPolicy(_comparison_policy_config(
+        "fpm" if args.adaptive_policy == "fpm" else "center", args))
+    random_policy = AdaptiveFoveationPolicy(_comparison_policy_config("random", args))
+
+    arms = ["single", "twopass_coverage", "twopass_random"]
+    rows_by_arm = {arm: [] for arm in arms}
+    for arm in arms:
+        os.makedirs(os.path.join(output_dir, arm, "masks"), exist_ok=True)
+    pass1_dir = os.path.join(output_dir, "pass1")
+    os.makedirs(os.path.join(pass1_dir, "masks"), exist_ok=True)
+
+    for idx, prompt in enumerate(prompts):
+        image_name = f"img_{idx:010d}.png"
+        plan1 = pass1_policy.plan_image(
+            prompt=prompt, height=args.height, width=args.width,
+            device=pipe.device, num_inference_steps=n1, lr_factor=lr_factor,
+        )
+
+        # ---- arm: single (full step budget, pass-1 mask) ----
+        single_path = os.path.join(output_dir, "single", image_name)
+        if os.path.exists(single_path):
+            wall = vit = float("nan")
+        else:
+            t0 = time.time()
+            image = _pipe_call(pipe, args, prompt, plan1.token_mask,
+                               full_res_foveation_mask=plan1.full_res_mask,
+                               extra_kwargs={"num_inference_steps": n1 + n2})
+            image.save(single_path)
+            wall = round(time.time() - t0, 3)
+            vit = float(getattr(pipe, "vit_timing", float("nan")))
+        rows_by_arm["single"].append({
+            "image": image_name, "prompt": prompt, "arm": "single",
+            "beta": plan1.beta, "hr_fraction": plan1.hr_fraction,
+            "token_ratio": plan1.token_ratio, "steps": n1 + n2,
+            "wall_time": wall, "vit_time": vit,
+        })
+
+        # ---- shared pass 1 for both two-pass arms ----
+        pass1_path = os.path.join(pass1_dir, image_name)
+        if os.path.exists(pass1_path):
+            pass1_image = PILImage.open(pass1_path).convert("RGB")
+            pass1_vit = float("nan")
+        else:
+            image = _pipe_call(pipe, args, prompt, plan1.token_mask,
+                               full_res_foveation_mask=plan1.full_res_mask,
+                               extra_kwargs={"num_inference_steps": n1})
+            image.save(pass1_path)
+            pass1_image = image
+            pass1_vit = float(getattr(pipe, "vit_timing", float("nan")))
+        _save_mask_image(plan1.full_res_mask, pipe, args,
+                         os.path.join(pass1_dir, "masks", f"mask_{idx:010d}.png"))
+
+        # ---- pass-2 masks ----
+        coverage = plan1.token_mask.float().cpu()
+        umap, _extras = mc_uncertainty_map(
+            pipe, pass1_image, prompt,
+            timestep_frac=args.uncertainty_timestep_frac,
+            num_samples=args.uncertainty_mc_samples, seed=args.seed + idx,
+        )
+        score = umap * (1.0 - args.coverage_decay * coverage)
+        mask2_cov = dense_mask_from_map(score, beta).to(pipe.device)
+        full2_cov = upsample_mask_full_res(mask2_cov, args.height, args.width).to(pipe.device)
+
+        plan2_rand = random_policy.plan_image(
+            prompt=prompt + " :: pass2", height=args.height, width=args.width,
+            device=pipe.device, num_inference_steps=n2, lr_factor=lr_factor,
+        )
+
+        for arm, mask2, full2 in (
+            ("twopass_coverage", mask2_cov, full2_cov),
+            ("twopass_random", plan2_rand.token_mask, plan2_rand.full_res_mask),
+        ):
+            out_path = os.path.join(output_dir, arm, image_name)
+            _save_mask_image(full2, pipe, args,
+                             os.path.join(output_dir, arm, "masks", f"mask_{idx:010d}.png"))
+            if os.path.exists(out_path):
+                wall = vit = float("nan")
+            else:
+                t0 = time.time()
+                image = _pipe_call(
+                    pipe, args, prompt, mask2, full_res_foveation_mask=full2,
+                    extra_kwargs={
+                        "num_inference_steps": n2,
+                        "input_image": pass1_image,
+                        "denoising_strength": args.coverage_strength,
+                    },
+                )
+                image.save(out_path)
+                wall = round(time.time() - t0, 3)
+                vit = float(getattr(pipe, "vit_timing", float("nan")))
+            rows_by_arm[arm].append({
+                "image": image_name, "prompt": prompt, "arm": arm,
+                "beta": beta,
+                "hr_fraction": float(mask2.float().mean()),
+                "token_ratio": token_ratio_from_mask(mask2, lr_factor=lr_factor),
+                "steps": f"{n1}+{n2}@{args.coverage_strength}",
+                "pass1_vit_time": pass1_vit,
+                "wall_time": wall, "vit_time": vit,
+            })
+        print(f"[coverage_refine] {idx + 1}/{len(prompts)} done")
+
+    for arm in arms:
+        if rows_by_arm[arm]:
+            pd.DataFrame(rows_by_arm[arm]).to_csv(
+                os.path.join(output_dir, arm, "metadata_00000.csv"), index=False)
+    with open(os.path.join(output_dir, "coverage_config.json"), "w") as f:
+        json.dump({"beta": beta, "n1": n1, "n2": n2,
+                   "strength": args.coverage_strength, "decay": args.coverage_decay,
+                   "policy": args.adaptive_policy, "num_prompts": len(prompts),
+                   "seed": args.seed}, f, indent=2)
+    print(f"[coverage_refine] done — outputs under {output_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +935,7 @@ EXPERIMENTS = {
     "ours": run_single_prompt_experiment,
     "ours_adaptive": run_adaptive_policy_experiment,
     "mask_source_comparison": run_mask_source_comparison,
+    "coverage_refine": run_coverage_refinement,
     "circular_traj": run_circular_traj,
     "vary_radius": run_vary_radius,
     "runtime": run_runtime_experiments,
