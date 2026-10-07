@@ -165,6 +165,9 @@ def main():
             is_foveated_pipeline=args.is_foveated_pipeline,
             foveated_training_mode=args.foveated_training_mode,
             lr_downsample_factor=args.lr_downsample_factor,
+            fpm_checkpoint=args.fpm_checkpoint,
+            fpm_beta_min=args.fpm_beta_min,
+            fpm_beta_max=args.fpm_beta_max,
         )
         logger = _make_image_logger(args)
     else:  # video

@@ -236,6 +236,7 @@ def _comparison_policy_config(arm: str, args) -> "AdaptiveFoveationConfig":
         "random": "prompt_hash",
         "saliency": "saliency",
         "fpm": "fpm",
+        "uncertainty_centers": "saliency",  # centers come via centers_override
     }
     if arm not in arm_to_policy:
         raise ValueError(f"unknown comparison arm: {arm!r} (valid: {sorted(arm_to_policy)})")
@@ -322,6 +323,36 @@ def run_mask_source_comparison(pipe, args, output_dir):
             with open(saliency_cache, "w") as f:
                 json.dump({str(k): [list(c) for c in v] for k, v in saliency_centers.items()}, f)
 
+    # ---- MC denoising-uncertainty maps from the references (FGD-019 arms) ----
+    # Computed with the base DiT (before the LoRA loads), like the saliency arm.
+    uncertainty_maps = {}
+    uncertainty_arms = [arm for arm in arms if arm.startswith("uncertainty")]
+    if uncertainty_arms:
+        from ..masks.uncertainty import centers_from_map, mc_uncertainty_map
+
+        cache_path = os.path.join(output_dir, "uncertainty_maps.pt")
+        if os.path.exists(cache_path):
+            uncertainty_maps = {int(k): v for k, v in torch.load(cache_path, weights_only=True).items()}
+        missing = [idx for idx in range(len(prompts)) if idx not in uncertainty_maps]
+        if missing:
+            print(f"[uncertainty] MC-variance maps for {len(missing)} references "
+                  f"(K={args.uncertainty_mc_samples}, t_frac={args.uncertainty_timestep_frac})")
+            for idx in missing:
+                pil = PILImage.open(os.path.join(highres_dir, f"img_{idx:010d}.png")).convert("RGB")
+                umap, _extras = mc_uncertainty_map(
+                    pipe, pil, prompts[idx],
+                    timestep_frac=args.uncertainty_timestep_frac,
+                    num_samples=args.uncertainty_mc_samples,
+                    seed=args.seed + idx,
+                )
+                uncertainty_maps[idx] = umap
+            torch.save({str(k): v for k, v in uncertainty_maps.items()}, cache_path)
+        uncertainty_centers = {
+            idx: centers_from_map(umap, getattr(args, "adaptive_num_fixations", 3))
+            for idx, umap in uncertainty_maps.items()
+        }
+        torch.cuda.empty_cache()
+
     # ---- Phase B: foveated arms under one LoRA ----
     lora_path = None
     if args.lora_checkpoint is not None:
@@ -341,19 +372,39 @@ def run_mask_source_comparison(pipe, args, output_dir):
         arm_dir = os.path.join(output_dir, arm)
         mask_dir = os.path.join(arm_dir, "masks")
         os.makedirs(mask_dir, exist_ok=True)
-        policy = AdaptiveFoveationPolicy(_comparison_policy_config(arm, args))
+        policy = None
+        if arm != "uncertainty":
+            policy = AdaptiveFoveationPolicy(_comparison_policy_config(arm, args))
 
         rows = []
         for idx, prompt in enumerate(prompts):
-            plan = policy.plan_image(
-                prompt=prompt,
-                height=args.height,
-                width=args.width,
-                device=pipe.device,
-                num_inference_steps=args.num_inference_steps,
-                lr_factor=lr_factor,
-                centers_override=saliency_centers.get(idx) if arm == "saliency" else None,
-            )
+            if arm == "uncertainty":
+                from ..masks.uncertainty import plan_from_dense_map
+
+                plan = plan_from_dense_map(
+                    uncertainty_maps[idx], args.comparison_beta,
+                    args.height, args.width, pipe.device, lr_factor=lr_factor,
+                    metadata_extra={
+                        "mc_samples": args.uncertainty_mc_samples,
+                        "timestep_frac": args.uncertainty_timestep_frac,
+                    },
+                )
+            else:
+                if arm == "saliency":
+                    override = saliency_centers.get(idx)
+                elif arm == "uncertainty_centers":
+                    override = uncertainty_centers.get(idx)
+                else:
+                    override = None
+                plan = policy.plan_image(
+                    prompt=prompt,
+                    height=args.height,
+                    width=args.width,
+                    device=pipe.device,
+                    num_inference_steps=args.num_inference_steps,
+                    lr_factor=lr_factor,
+                    centers_override=override,
+                )
             image_name = f"img_{idx:010d}.png"
             image_path = os.path.join(arm_dir, image_name)
             _save_mask_image(plan.full_res_mask, pipe, args, os.path.join(mask_dir, f"mask_{idx:010d}.png"))

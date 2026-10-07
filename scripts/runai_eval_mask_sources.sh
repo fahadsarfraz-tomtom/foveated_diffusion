@@ -36,7 +36,7 @@ DIFFSYNTH_REPOSITORY="${DIFFSYNTH_REPOSITORY:-https://github.com/modelscope/Diff
 
 FPM_CKPT="${FPM_CKPT:-/data/bucket/foveated_diffusion/outputs/fpm_coco_latent/fgd017-coco-latent-5k-1783937370/final.pt}"
 LORA_MODE="${LORA_MODE:-random}"     # Chao's released mask-location-agnostic image LoRA
-ARMS="${ARMS:-center random saliency fpm}"
+ARMS="${ARMS:-center random saliency fpm uncertainty}"
 BETA="${BETA:-0.25}"
 HEIGHT="${HEIGHT:-1024}"
 WIDTH="${WIDTH:-1024}"

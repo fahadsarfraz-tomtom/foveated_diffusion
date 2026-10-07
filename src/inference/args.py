@@ -160,13 +160,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Scheduler timestep index the FPM is conditioned on in prior "
                         "mode (0 = noisiest, matching training's timestep_id indexing).")
 
-    # Matched-budget mask-source comparison (FGD-018)
+    # Matched-budget mask-source comparison (FGD-018 / FGD-019)
     p.add_argument("--comparison_arms", type=str, nargs="+",
-                   default=["center", "random", "saliency", "fpm"],
+                   default=["center", "random", "saliency", "fpm", "uncertainty"],
                    help="Foveated arms for mask_source_comparison. Each arm uses the "
-                        "same HR token budget; only the mask source differs.")
+                        "same HR token budget; only the mask source differs. "
+                        "`uncertainty` = dense top-beta MC-variance mask; "
+                        "`uncertainty_centers` = its peak centers with budget-solved radius.")
     p.add_argument("--comparison_beta", type=float, default=0.25,
                    help="Shared HR token fraction (beta) for all comparison arms.")
+    p.add_argument("--uncertainty_mc_samples", type=int, default=8,
+                   help="MC noise draws per image for denoising-uncertainty maps.")
+    p.add_argument("--uncertainty_timestep_frac", type=float, default=0.5,
+                   help="Scheduler-timestep fraction at which uncertainty is probed.")
     p.add_argument("--adaptive_num_fixations", type=int, default=3,
                    help="Number of fixation centers for adaptive image masks.")
     p.add_argument("--adaptive_center_range", type=float, default=0.35,

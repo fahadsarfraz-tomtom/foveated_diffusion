@@ -167,3 +167,49 @@ class FpmMaskPolicy:
             "fpm_pred_radii": [round(r, 4) for r in pred_radii],
         }
         return centers, pred_radii, metadata
+
+    @torch.no_grad()
+    def predict_weight_map_from_latents(
+        self,
+        latents_spatial: torch.Tensor,
+        prompt: str,
+        timestep_value: float,
+        out_height: int,
+        out_width: int,
+    ) -> torch.Tensor:
+        """Predict the foveation weight map from actual (noisy) latents.
+
+        Content mode, used for foveated LoRA training (`fpm` training mode):
+        the latents come from the live training batch instead of the prior-mode
+        noise draw. Spatial dims are resized to the FPM's trained grid;
+        channels must match (same VAE on both sides).
+
+        Returns a weight map [out_height, out_width] in [0, 1] on the FPM's device.
+        """
+        from ..training.coco_fpm import token_ids_from_caption
+
+        device = next(self.fpm.parameters()).device
+        latents = latents_spatial.to(device=device, dtype=torch.float32)
+        if latents.dim() == 3:
+            latents = latents.unsqueeze(0)
+        if latents.shape[1] != self.latent_channels:
+            raise ValueError(
+                f"FPM expects {self.latent_channels} latent channels, got "
+                f"{latents.shape[1]} — checkpoint/VAE mismatch"
+            )
+        if latents.shape[-2:] != (self.latent_height, self.latent_width):
+            latents = torch.nn.functional.interpolate(
+                latents, size=(self.latent_height, self.latent_width),
+                mode="bilinear", align_corners=False,
+            )
+
+        token_ids = token_ids_from_caption(prompt, self.vocab_size, self.max_tokens)
+        token_ids = token_ids.unsqueeze(0).to(device)
+        text_embeddings = self.text_embedder(token_ids)
+        timesteps = torch.full((1,), float(timestep_value), device=device)
+
+        _cx, _cy, _r, _logits, weight = self.fpm.predict_slots(
+            latents[:1], text_embeddings, timesteps=timesteps,
+            out_height=out_height, out_width=out_width,
+        )
+        return weight[0]

@@ -52,9 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="(image) LR periphery downsample factor.")
     p.add_argument(
         "--foveated_training_mode", type=str, default="random",
-        choices=["fixed", "random", "saliency", "bbox"],
-        help="(image) Foveation-mask sampler during training.",
+        choices=["fixed", "random", "saliency", "bbox", "fpm"],
+        help="(image) Foveation-mask sampler during training. `fpm` predicts the "
+             "mask with a trained FPM from the live noisy latents + caption "
+             "(requires --fpm_checkpoint).",
     )
+    p.add_argument("--fpm_checkpoint", type=str, default=None,
+                   help="(image) FPM checkpoint for --foveated_training_mode fpm.")
+    p.add_argument("--fpm_beta_min", type=float, default=0.15,
+                   help="(image, fpm mode) Lower bound of the per-step HR budget.")
+    p.add_argument("--fpm_beta_max", type=float, default=0.45,
+                   help="(image, fpm mode) Upper bound of the per-step HR budget.")
 
     # Video-pipeline specific
     p.add_argument("--foveation_from_video", action="store_true",

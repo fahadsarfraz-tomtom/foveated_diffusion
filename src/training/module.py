@@ -40,6 +40,9 @@ class Flux2FoveatedImageTrainingModule(DiffusionTrainingModule):
         is_foveated_pipeline=True,
         foveated_training_mode="random",
         lr_downsample_factor=2,
+        fpm_checkpoint=None,
+        fpm_beta_min=0.15,
+        fpm_beta_max=0.45,
     ):
         super().__init__()
         model_configs = self.parse_model_configs(
@@ -62,13 +65,19 @@ class Flux2FoveatedImageTrainingModule(DiffusionTrainingModule):
         self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
 
         self.pipe.is_foveated_pipeline = is_foveated_pipeline
-        assert foveated_training_mode in ("fixed", "random", "saliency", "bbox"), \
-            "foveated_training_mode must be one of: fixed, random, saliency, bbox"
+        assert foveated_training_mode in ("fixed", "random", "saliency", "bbox", "fpm"), \
+            "foveated_training_mode must be one of: fixed, random, saliency, bbox, fpm"
         self.pipe.foveated_training_mode = foveated_training_mode
         self.foveated_training_mode = foveated_training_mode
         self.lr_downsample_factor = lr_downsample_factor
+        if foveated_training_mode == "fpm":
+            assert fpm_checkpoint, "foveated_training_mode='fpm' requires --fpm_checkpoint"
+        self.pipe.fpm_checkpoint = fpm_checkpoint
+        self.pipe.fpm_beta_min = fpm_beta_min
+        self.pipe.fpm_beta_max = fpm_beta_max
         print(f"[TrainingModule] foveated={is_foveated_pipeline}  "
-              f"mode={foveated_training_mode}  lr_factor={lr_downsample_factor}")
+              f"mode={foveated_training_mode}  lr_factor={lr_downsample_factor}  "
+              f"fpm_ckpt={fpm_checkpoint}")
 
         parts = []
         if trainable_models:

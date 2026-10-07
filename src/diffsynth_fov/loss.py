@@ -39,12 +39,57 @@ def _create_fixed_foveation_mask(h, w, device, dtype=torch.float32,
     return (dist_sq <= radius_px ** 2).to(device)
 
 
-def _resolve_foveation_mask(pipe: BasePipeline, inputs: dict, h: int, w: int):
+def _fpm_foveation_mask(pipe: BasePipeline, inputs: dict, h: int, w: int,
+                        timestep_id=None):
+    """FGD-020: foveation mask predicted by the trained FPM on the live batch.
+
+    Runs the FPM on the current noisy latents + caption at the sampled
+    timestep (its training regime), then binarizes the predicted weight map at
+    a per-step budget beta ~ U(fpm_beta_min, fpm_beta_max) so mask coverage
+    stays in the same range as the `random` mode (keeps the LoRA
+    location-agnostic while making placement content-adaptive).
+    """
+    policy = getattr(pipe, "_fpm_mask_policy", None)
+    if policy is None:
+        from ..masks.fpm_policy import FpmMaskPolicy
+
+        checkpoint = getattr(pipe, "fpm_checkpoint", None)
+        if not checkpoint:
+            raise ValueError("foveated_training_mode='fpm' requires fpm_checkpoint")
+        policy = FpmMaskPolicy.load(checkpoint, device=pipe.device)
+        pipe._fpm_mask_policy = policy
+
+    prompt = inputs.get("prompt")
+    if isinstance(prompt, (list, tuple)):
+        prompt = prompt[0]
+    latents_seq = inputs["latents"]  # [B, h*w, C], noisy at the sampled timestep
+    latents_spatial = (
+        latents_seq[:1].transpose(1, 2).reshape(1, latents_seq.shape[-1], h, w)
+    )
+    t_value = float(timestep_id.reshape(-1)[0]) if torch.is_tensor(timestep_id) \
+        else float(timestep_id or 0)
+
+    weight = policy.predict_weight_map_from_latents(
+        latents_spatial, prompt or "", t_value, out_height=h, out_width=w,
+    )
+
+    beta_min = float(getattr(pipe, "fpm_beta_min", 0.15))
+    beta_max = float(getattr(pipe, "fpm_beta_max", 0.45))
+    beta = beta_min + float(torch.rand(1)) * max(beta_max - beta_min, 0.0)
+    k = max(1, int(round(beta * weight.numel())))
+    threshold = torch.topk(weight.flatten(), k).values.min()
+    mask = (weight >= threshold).to(device=pipe.device, dtype=pipe.torch_dtype)
+    return mask
+
+
+def _resolve_foveation_mask(pipe: BasePipeline, inputs: dict, h: int, w: int,
+                            timestep_id=None):
     """Resolve a token-grid foveation mask based on `foveated_training_mode`.
 
     Modes:
       - `fixed`: centered, r=0.5
       - `random`: sampled each step
+      - `fpm`: predicted by a trained FPM from the live noisy latents + caption
       - `saliency` / `bbox`: use `inputs["foveation_mask"]` (e.g. precomputed from a
         saliency map or bounding boxes)
     """
@@ -54,6 +99,8 @@ def _resolve_foveation_mask(pipe: BasePipeline, inputs: dict, h: int, w: int):
                                             center=(0.0, 0.0), r=0.5)
     if mode == "random":
         return _create_random_foveation_mask(h, w, pipe.device, pipe.torch_dtype)
+    if mode == "fpm":
+        return _fpm_foveation_mask(pipe, inputs, h, w, timestep_id=timestep_id)
     if mode in ("saliency", "bbox"):
         mask = inputs.get("foveation_mask")
         if mask is None:
@@ -108,7 +155,8 @@ def FoveatedFlowMatchSFTLoss(pipe: BasePipeline, **inputs):
         width = inputs["width"]
         batch_size, _, channels = inputs["latents"].shape
         h, w = height // 16, width // 16
-        foveation_mask = _resolve_foveation_mask(pipe, inputs, h, w)
+        foveation_mask = _resolve_foveation_mask(pipe, inputs, h, w,
+                                                 timestep_id=timestep_id)
 
         lr_factor = inputs.get("lr_downsample_factor", 2)
         n_per_block = lr_factor * lr_factor
