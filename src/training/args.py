@@ -15,6 +15,15 @@ def str_to_bool(s):
     raise argparse.ArgumentTypeError(f"Expected true/false, got {s!r}")
 
 
+def _add_argument_safe(parser, *args, **kwargs):
+    """add_argument that tolerates options already defined by diffsynth's
+    add_general_config (its newer versions ship their own wandb flags)."""
+    try:
+        parser.add_argument(*args, **kwargs)
+    except argparse.ArgumentError:
+        pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Foveated diffusion training (image / video)")
     p.add_argument("--pipeline", type=str, default="image", choices=["image", "video"],
@@ -26,9 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tokenizer_path", type=str, default=None)
 
     # WandB / validation (image-only validation viz for now; video has no logger yet)
-    p.add_argument("--use_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="foveated-diffusion")
-    p.add_argument("--wandb_run_name", type=str, default=None)
+    _add_argument_safe(p, "--use_wandb", action="store_true")
+    _add_argument_safe(p, "--wandb_project", type=str, default="foveated-diffusion")
+    _add_argument_safe(p, "--wandb_run_name", type=str, default=None)
     p.add_argument("--validation_prompts", type=str, nargs="+", default=None)
     p.add_argument("--validation_steps", type=int, default=500)
     p.add_argument("--validation_height", type=int, default=1024)
