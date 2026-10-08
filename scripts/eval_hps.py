@@ -142,7 +142,12 @@ def main():
     print(json.dumps(summary, indent=2))
 
     if args.use_wandb:
-        import wandb
+        try:
+            import wandb
+        except Exception as exc:  # hpsv2 downgrades protobuf and can break wandb
+            print(f"[eval_hps] W&B upload skipped (import failed: {exc}); "
+                  "metrics are on disk in hps_summary.json / hps_scores.csv")
+            return
 
         run = wandb.init(
             project=args.wandb_project,
