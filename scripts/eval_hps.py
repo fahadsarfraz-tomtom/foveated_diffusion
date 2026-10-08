@@ -65,6 +65,16 @@ def _import_hpsv2():
         stub.forward = None
         sys.modules["turtle"] = stub
     import hpsv2
+
+    # The pip wheel omits the vendored CLIP BPE vocab (second known packaging
+    # flaw); fetch it next to the vendored open_clip before the first score().
+    bpe_path = os.path.join(os.path.dirname(hpsv2.__file__),
+                            "src", "open_clip", "bpe_simple_vocab_16e6.txt.gz")
+    if not os.path.exists(bpe_path):
+        import urllib.request
+        url = "https://raw.githubusercontent.com/openai/CLIP/main/clip/bpe_simple_vocab_16e6.txt.gz"
+        print(f"[eval_hps] fetching missing BPE vocab -> {bpe_path}")
+        urllib.request.urlretrieve(url, bpe_path)
     return hpsv2
 
 
