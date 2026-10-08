@@ -29,6 +29,14 @@ from .adaptive import FoveationPlan, token_ratio_from_mask
 # Scheduler/model convention probing
 # ---------------------------------------------------------------------------
 
+def _smooth(map2d: torch.Tensor, kernel: int = 3) -> torch.Tensor:
+    """3x3 average-pool smoothing; rank metrics and masks want the local field,
+    not per-token estimator noise."""
+    return F.avg_pool2d(
+        map2d[None, None].float(), kernel_size=kernel, stride=1, padding=kernel // 2,
+    )[0, 0]
+
+
 def resolve_affine_coeffs(scheduler, timestep) -> tuple[float, float, float, float]:
     """Return (a, b, c, d) with x_t = a*x1 + b*x0 and target = c*x1 + d*x0.
 
@@ -121,7 +129,7 @@ def mc_uncertainty_map(
     num_samples: int = 8,
     seed: int = 0,
     conditioning: Optional[dict] = None,
-    signal: str = "loss",
+    signal: str = "bias",
 ) -> tuple[torch.Tensor, dict]:
     """MC denoising-uncertainty map for one image.
 
@@ -179,17 +187,28 @@ def mc_uncertainty_map(
     target = pipe.scheduler.training_target(
         clean.expand(num_samples, -1, -1).float(), noise.float(), timestep,
     )
-    loss_map = (pred.float() - target).pow(2).mean(dim=(0, -1))  # [L]
-    umap_loss = loss_map.reshape(h, w).float().cpu()
+    error = pred.float() - target  # [K, L, C], = sigma-scaled (x1_hat - x1)/sigma per draw
 
-    # Secondary signal: MC variance of the one-step clean estimate.
+    # Primary signal: SYSTEMATIC prediction bias — mean the SIGNED error over
+    # draws first, then take the norm. The irreducible noise-prediction error
+    # is zero-mean across draws and cancels ~1/sqrt(K) (CLT); what survives is
+    # the model's per-token systematic difficulty. Norm-then-mean ("loss") and
+    # MC variance are both swamped by the irreducible term's sampling noise at
+    # small K (verified: structureless salt-and-pepper maps).
+    bias_map = error.mean(dim=0).pow(2).mean(dim=-1)  # [L]
+    umap_bias = _smooth(bias_map.reshape(h, w)).float().cpu()
+
+    loss_map = error.pow(2).mean(dim=(0, -1))  # [L]
+    umap_loss = _smooth(loss_map.reshape(h, w)).float().cpu()
+
     x1_hat = solve_x1(x_t.float(), pred.float(), coeffs)
     variance = x1_hat.var(dim=0, unbiased=True).mean(dim=-1)  # [L]
-    umap_mcvar = variance.reshape(h, w).float().cpu()
+    umap_mcvar = _smooth(variance.reshape(h, w)).float().cpu()
 
-    umap = umap_loss if signal == "loss" else umap_mcvar
+    umap = {"bias": umap_bias, "loss": umap_loss, "mcvar": umap_mcvar}[signal]
 
     extras = {
+        "bias_map": umap_bias,
         "loss_map": umap_loss,
         "mcvar_map": umap_mcvar,
         "timestep": float(timesteps[t_idx]),

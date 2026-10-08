@@ -42,7 +42,7 @@ def parse_args():
     p.add_argument("--image_size", type=int, default=512,
                    help="Square resize; must be a multiple of 16.")
     p.add_argument("--timestep_fracs", type=float, nargs="+", default=[0.3, 0.5, 0.7])
-    p.add_argument("--mc_samples", type=int, default=8)
+    p.add_argument("--mc_samples", type=int, default=16)
     p.add_argument("--beta", type=float, default=0.25, help="Top-beta for IoU.")
     p.add_argument("--fpm_checkpoint", type=str, default=None)
     p.add_argument("--model_id", type=str, default=None)
@@ -175,6 +175,7 @@ def main():
             unc = umap.numpy()
 
             maps = {"uncertainty": unc,
+                    "lossmap": extras["loss_map"].numpy(),
                     "mcvar": extras["mcvar_map"].numpy(),
                     "saliency": sal, "boxes": box_mask}
             if fpm_policy is not None:
